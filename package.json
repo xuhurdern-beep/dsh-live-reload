@@ -8,11 +8,11 @@
   "author": "hurdern <xuhurdern@gmail.com>",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hurdern/dsh-live-reload.git"
+    "url": "git+https://github.com/xuhurdern-beep/dsh-live-reload.git"
   },
-  "homepage": "https://github.com/hurdern/dsh-live-reload#readme",
+  "homepage": "https://github.com/xuhurdern-beep/dsh-live-reload#readme",
   "bugs": {
-    "url": "https://github.com/hurdern/dsh-live-reload/issues"
+    "url": "https://github.com/xuhurdern-beep/dsh-live-reload/issues"
   },
   "engines": {
     "node": ">=22"
