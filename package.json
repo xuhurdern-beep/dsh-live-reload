@@ -1,0 +1,53 @@
+{
+  "name": "dsh-live-reload",
+  "version": "0.1.0",
+  "description": "One-click hot reload of the running DSH plugin composition — re-apply bundle layers, user patches and overlays without restarting the process. / 一键热刷新 DSH 插件组合：重读 bundle 层、用户补丁层与覆盖层并即时应用，无需重启进程。",
+  "type": "module",
+  "main": "./src/index.js",
+  "license": "MIT",
+  "files": [
+    "src",
+    "client",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./client/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "dsh-plugin",
+    "hot-reload",
+    "live-reload",
+    "plugin-manager",
+    "reload"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "build:client": "tsdown",
+    "check": "node --check src/index.js && node --check src/client/index.js"
+  },
+  "devDependencies": {
+    "tsdown": "^0.22.14"
+  }
+}

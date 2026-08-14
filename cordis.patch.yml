@@ -1,0 +1,8 @@
+# dsh-live-reload bundle patch — inserts the plugin's host row into the profile.
+#
+# The host half registers the /dsh-live-reload/* routes and implements the
+# restart-free composition refresh. The client half (client/client.js) renders
+# the "Plugin Refresh / 插件刷新" button in Settings.
+- insert:
+    - id: dsh-live-reload
+      name: 'dsh-live-reload'

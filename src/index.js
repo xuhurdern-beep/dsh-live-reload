@@ -1,0 +1,473 @@
+/**
+ * dsh-live-reload — host half.
+ *
+ * Re-composes the FULL plugin composition of the running profile — bundle
+ * layers (`dsh.profile.bundles`), the profile user layer (`cordis.patch.yml`),
+ * the home user layer (`$DSH_HOME/cordis.patch.yml`) and the launcher
+ * overlays (`--patch` files, the agent-presets shipped-roots overlay, the
+ * telemetry switch) — and transactionally applies it to the live tree through
+ * the root Include entry. The process, the web server and all sessions stay
+ * up: only the loader rows that actually changed are mounted, updated or
+ * disposed (unchanged rows are left untouched), exactly like the built-in
+ * user-patch HMR that already hot-applies `cordis.patch.yml` edits.
+ *
+ * A refresh is a power action but performs no shell execution and mutates
+ * only the in-memory loader tree (plus nothing on disk), so it is safe to
+ * expose over a same-origin HTTP route.
+ *
+ * @module dsh-live-reload
+ */
+
+import { createRequire } from 'node:module'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { basename, dirname, join } from 'node:path'
+import { homedir } from 'node:os'
+
+export const name = 'dsh-live-reload'
+
+const BIN = 'dsh-live-reload'
+
+/** The root Include row id pinned by `mountRootInclude` (see dsh-app-boot). */
+const INCLUDE_ID = 'include'
+
+/** The telemetry row id targeted by the DSH_TELEMETRY_DISABLED switch. */
+const TELEMETRY_ROW_ID = 'session-telemetry-otel'
+
+/** Upper bound for one refresh; a wedged loader update must fail, not hang. */
+const REFRESH_TIMEOUT_MS = 120_000
+
+/**
+ * The Harness home — same rule as the launcher (`DSH_HOME` overrides ~/.dsh).
+ * @returns {string} absolute home path.
+ */
+function dshHome() {
+  return process.env.DSH_HOME ?? join(homedir(), '.dsh')
+}
+
+/**
+ * The booted profile directory, from the config tree's baseUrl. A hand-built
+ * tree (no baseUrl) cannot be refreshed this way.
+ * @param {import('@deepseek-ai/cordis').Context} ctx
+ * @returns {string} absolute profile directory.
+ */
+function profileDirOf(ctx) {
+  if (ctx.baseUrl === undefined) {
+    throw new Error(`${BIN}: no ctx.baseUrl — the composition was not booted from a profile`)
+  }
+  return fileURLToPath(new URL('.', ctx.baseUrl))
+}
+
+/**
+ * `@deepseek-ai/dsh-app-boot` is shipped with the harness and resolves at
+ * runtime through the profile's hoisted node_modules / installation fallback
+ * (never declared as a dependency — the same runtime-import pattern the
+ * ecosystem's market plugin uses for `cordis-plugin-include`).
+ *
+ * Anchors, in order: (1) the plugin package root's own parent walk (runtime:
+ * the installed copy sits inside the profile's node_modules, so the walk
+ * reaches the profile deps and the `$DSH_HOME/profiles/node_modules` flat
+ * fallback); (2) the installation fallback directly (source-tree development
+ * and offline validation).
+ * @returns {Promise<typeof import('@deepseek-ai/dsh-app-boot') | null>}
+ */
+let appBootPromise
+async function loadAppBoot() {
+  if (appBootPromise !== undefined) return appBootPromise
+  appBootPromise = (async () => {
+    const anchors = [
+      fileURLToPath(new URL('../', import.meta.url)),
+      join(dshHome(), 'profiles', 'node_modules'),
+    ]
+    let lastAnchorError
+    for (const base of anchors) {
+      try {
+        const require = createRequire(join(base, 'package.json'))
+        const resolved = require.resolve('@deepseek-ai/dsh-app-boot')
+        return await import(pathToFileURL(resolved).href)
+      } catch (error) {
+        // Keep the last failure for diagnostics; a bare specifier may simply
+        // not resolve from every anchor.
+        lastAnchorError = error
+      }
+    }
+    console.warn(`${BIN}: cannot resolve @deepseek-ai/dsh-app-boot from ${anchors.join(' | ')}: ${lastAnchorError?.message}`)
+    return null
+  })()
+  return appBootPromise
+}
+
+/** Resolve a `require` anchored at the profile's package.json. */
+function requireFromProfile(profileDir) {
+  return createRequire(join(profileDir, 'package.json'))
+}
+
+/**
+ * Resolve one bundle package's directory from the profile anchor. Matches the
+ * Loader's own resolution: the profile's node_modules first (pnpm-hoisted),
+ * then the installation flat fallback `$DSH_HOME/profiles/node_modules`.
+ * @param {NodeJS.Require} requireProfile
+ * @param {string} packageName
+ * @returns {string} absolute package directory.
+ */
+function resolveBundleDir(requireProfile, packageName) {
+  try {
+    return dirname(requireProfile.resolve(`${packageName}/package.json`))
+  } catch (error) {
+    throw new Error(
+      `${BIN}: cannot resolve profile bundle ${JSON.stringify(packageName)} — `
+      + `is it installed? Run 'dsh plugin --profile <name> add ${packageName}' (${error.message})`,
+    )
+  }
+}
+
+/** The installed dsh app package root, when resolvable (used for the shipped agent-presets root). */
+function dshAppDir(requireProfile) {
+  try {
+    return dirname(requireProfile.resolve('@deepseek-ai/dsh/package.json'))
+  } catch {
+    return undefined
+  }
+}
+
+/** `--patch <file>` / `--patch=<file>` overlays from this invocation's argv, in order. */
+function patchFilesFromArgv() {
+  const files = []
+  const argv = process.argv
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (token === '--patch') {
+      const value = argv[i + 1]
+      if (value !== undefined && !value.startsWith('--')) {
+        files.push(value)
+        i += 1
+      }
+    } else if (token.startsWith('--patch=')) {
+      files.push(token.slice('--patch='.length))
+    }
+  }
+  return files
+}
+
+/**
+ * Compose the FULL patch stack exactly as the launcher would boot it, read
+ * fresh from disk: bundle layers in `dsh.profile.bundles` order, the profile
+ * user layer, the home user layer, `--patch` overlays, the agent-presets
+ * shipped-roots overlay and the telemetry switch.
+ *
+ * This is the faithful live mirror of `composeProfile`/`composeLive` in the
+ * dsh launcher — a refresh must recompute everything, because bundle layers
+ * (unlike the watched user patch files) are otherwise frozen at boot.
+ *
+ * The returned list is a fresh deep clone: the include pushes `insert` rows
+ * into the mounted tree BY REFERENCE and later id-targeted patches mutate
+ * those objects in place, so reusing one parsed patch object across
+ * generations would bake a user override into a bundle's insert row.
+ *
+ * Pure function (no ctx): exported so tests and CLI tooling can compare the
+ * recomposed stack against the launcher's own boot composition.
+ * @param {string} profileDir - absolute profile directory.
+ * @param {string} [home] - Harness home (defaults to the launcher rule).
+ * @returns {Promise<object[]>} the fresh patch stack.
+ */
+export async function composeFresh(profileDir, home = dshHome()) {
+  const ab = await loadAppBoot()
+  if (ab === null) {
+    throw new Error(`${BIN}: @deepseek-ai/dsh-app-boot is not resolvable from the profile — cannot recompose`)
+  }
+  const requireProfile = requireFromProfile(profileDir)
+
+  const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  const bundleNames = manifest.dsh?.profile?.bundles ?? []
+
+  // 1. bundle layers — the part a boot freezes, read fresh here.
+  const bundlePatches = []
+  for (const packageName of bundleNames) {
+    const packageDir = resolveBundleDir(requireProfile, packageName)
+    const bundleManifest = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8'))
+    const declared = bundleManifest.dsh?.bundle?.patch
+    if (typeof declared !== 'string') {
+      throw new Error(`${BIN}: profile bundle ${JSON.stringify(packageName)} declares no dsh.bundle in its package.json`)
+    }
+    bundlePatches.push(...ab.loadOverlayPatches(BIN, join(packageDir, declared)))
+  }
+
+  // 2. user layers — the files the built-in HMR already watches.
+  const profilePatches = ab.loadOptionalPatches(BIN, join(profileDir, 'cordis.patch.yml')) ?? []
+  const homePatches = ab.loadOptionalPatches(BIN, join(home, 'cordis.patch.yml')) ?? []
+
+  // 3. launcher overlays.
+  const overlays = []
+  for (const file of patchFilesFromArgv()) {
+    overlays.push(...ab.loadOverlayPatches(BIN, file))
+  }
+
+  // The composed row index BEFORE the launcher's own overlays, mirroring the
+  // launcher's `rows` map (used to decide the agent-presets and telemetry
+  // patches).
+  const rows = new Map(
+    ab.composeEntries([bundlePatches, profilePatches, homePatches, overlays]).map(row => [row.id, row]),
+  )
+
+  // 4. agent-presets shipped-roots overlay: without it a refresh would drop
+  //    the installation's own preset root from the live roster.
+  if (rows.has('agent-presets')) {
+    const appDir = dshAppDir(requireProfile)
+    if (appDir !== undefined) {
+      overlays.push({
+        id: 'agent-presets',
+        config: {
+          ...(rows.get('agent-presets')?.config ?? {}),
+          roots: [{ path: join(appDir, 'config', 'agent-presets'), trust: 'system' }],
+        },
+      })
+    }
+  }
+
+  // 5. telemetry switch (ANY non-empty value disables — same rule as boot).
+  const disabledEnv = process.env.DSH_TELEMETRY_DISABLED
+  if (disabledEnv !== undefined && disabledEnv !== '' && rows.has(TELEMETRY_ROW_ID)) {
+    overlays.push({ id: TELEMETRY_ROW_ID, disabled: true })
+  }
+
+  return structuredClone([...bundlePatches, ...profilePatches, ...homePatches, ...overlays])
+}
+
+/**
+ * Locate the root Include entry — the pinned `include` loader row the boot
+ * include mounts the whole tree through.
+ * @param {import('@deepseek-ai/cordis').Context} ctx
+ */
+function findRootInclude(ctx) {
+  const loader = ctx.get('loader')
+  if (loader === undefined) throw new Error(`${BIN}: loader service is unavailable`)
+  for (const entry of loader.entries()) {
+    if (entry.options.id === INCLUDE_ID || entry.options.name === 'cordis:include') return entry
+  }
+  return undefined
+}
+
+/** Fingerprint of one loader row's effective options (scalar data only). */
+function fingerprintEntry(entry) {
+  const o = entry.options
+  return JSON.stringify([o.name, o.disabled ?? null, o.inject ?? null, o.group ?? null, o.config ?? null])
+}
+
+/**
+ * Snapshot the current loader entry ids → fingerprints, for the refresh diff.
+ * @param {import('@deepseek-ai/cordis').Context} ctx
+ * @returns {Map<string, string>}
+ */
+function snapshotEntries(ctx) {
+  const loader = ctx.get('loader')
+  const map = new Map()
+  if (loader === undefined) return map
+  for (const entry of loader.entries()) {
+    if (entry.options.id === INCLUDE_ID) continue
+    map.set(entry.options.id, fingerprintEntry(entry))
+  }
+  return map
+}
+
+/**
+ * Diff two entry snapshots into added/removed/updated lists.
+ * @param {Map<string, string>} before
+ * @param {Map<string, string>} after
+ */
+function diffEntries(before, after) {
+  const added = []
+  const removed = []
+  const updated = []
+  for (const [id, fp] of after) {
+    if (!before.has(id)) added.push(id)
+    else if (before.get(id) !== fp) updated.push(id)
+  }
+  for (const id of before.keys()) {
+    if (!after.has(id)) removed.push(id)
+  }
+  return { added, removed, updated }
+}
+
+/**
+ * Post-refresh audit, mirroring the boot's `assertEntriesActivated`: every
+ * enabled loader row must have a live fiber.
+ * @param {import('@deepseek-ai/cordis').Context} ctx
+ * @returns {string[]} human-readable failures (empty when all rows are up).
+ */
+function auditEntries(ctx) {
+  const loader = ctx.get('loader')
+  if (loader === undefined) return [`${BIN}: loader service is unavailable`]
+  const errors = []
+  for (const entry of loader.entries()) {
+    if (entry.disabled) continue
+    if (entry.fiber === undefined) {
+      errors.push(`${entry.options.id} (${entry.options.name ?? '?'}) did not activate`)
+    }
+  }
+  return errors
+}
+
+/**
+ * Perform one restart-free composition refresh.
+ * @param {import('@deepseek-ai/cordis').Context} ctx
+ * @returns {Promise<object>} JSON-safe result for the route and status page.
+ */
+async function performRefresh(ctx) {
+  const profileDir = profileDirOf(ctx)
+  const patches = await composeFresh(profileDir)
+
+  const include = findRootInclude(ctx)
+  if (include === undefined) {
+    throw new Error(`${BIN}: root Include entry not found — cannot live-apply the composition`)
+  }
+
+  const before = snapshotEntries(ctx)
+  const clientModules = ctx.get('clientModules')
+  const revBefore = clientModules?.graph()?.rev
+
+  // The exact transactional call the built-in user-patch HMR makes on every
+  // cordis.patch.yml save: swap the include's patch stack and let the loader
+  // reconcile the tree (mount new rows, config-update changed rows, dispose
+  // removed rows, roll back on failure).
+  const { patches: _previous, ...includeConfig } = include.options.config ?? {}
+  await include.update({ config: { ...includeConfig, patches } })
+
+  // Let the loader flush remaining lifecycle tasks and the client-modules
+  // graph settle, then audit + diff.
+  await ctx.get('loader')?.await()
+  await new Promise((resolve) => { const t = setTimeout(resolve, 0); t.unref?.() })
+
+  const after = snapshotEntries(ctx)
+  const revAfter = clientModules?.graph()?.rev
+  const errors = auditEntries(ctx)
+
+  return {
+    ok: errors.length === 0,
+    profile: basename(profileDir),
+    ...diffEntries(before, after),
+    errors,
+    clientGraphChanged: revBefore !== undefined && revAfter !== undefined && revBefore !== revAfter,
+  }
+}
+
+/** Same-origin gate for the POST routes (same rule as the ecosystem market). */
+function sameOrigin(request) {
+  const origin = request.headers.origin
+  const host = request.headers.host
+  if (origin === undefined || host === undefined) return false
+  try {
+    return new URL(origin).host === host
+  } catch {
+    return false
+  }
+}
+
+/** JSON helper for route responses. */
+function sendJson(response, status, payload) {
+  response.writeHead(status, {
+    'cache-control': 'no-store',
+    'content-type': 'application/json; charset=utf-8',
+  })
+  response.end(JSON.stringify(payload))
+}
+
+/** Bound a promise so a wedged refresh cannot hang the HTTP route. */
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      const t = setTimeout(() => reject(new Error(`${BIN}: ${label} timed out after ${ms}ms`)), ms)
+      t.unref?.()
+    }),
+  ])
+}
+
+/**
+ * Register the status/refresh routes on the web server.
+ * @param {import('@deepseek-ai/cordis').Context} ctx
+ * @param {{refreshing: boolean, last: object | null}} state
+ * @returns {(() => void) | undefined} route disposer (or undefined without a web server).
+ */
+function registerRoutes(ctx, state) {
+  const webServer = ctx.get('webServer')
+  if (webServer === undefined) return undefined
+
+  const disposers = [
+    webServer.register({
+      kind: 'exact',
+      path: '/dsh-live-reload/status',
+      handler: (request, response) => {
+        if (request.method !== 'GET' && request.method !== 'HEAD') {
+          response.writeHead(405)
+          response.end()
+          return
+        }
+        const profileDir = profileDirOf(ctx)
+        sendJson(response, 200, {
+          plugin: 'dsh-live-reload',
+          profile: basename(profileDir),
+          refreshing: state.refreshing,
+          last: state.last,
+        })
+      },
+    }),
+    webServer.register({
+      kind: 'exact',
+      path: '/dsh-live-reload/refresh',
+      handler: async (request, response) => {
+        if (request.method !== 'POST') {
+          response.writeHead(405)
+          response.end()
+          return
+        }
+        if (!sameOrigin(request)) {
+          sendJson(response, 403, { ok: false, error: 'untrusted origin' })
+          return
+        }
+        if (state.refreshing) {
+          sendJson(response, 409, { ok: false, error: 'a refresh is already running' })
+          return
+        }
+        state.refreshing = true
+        try {
+          const result = await withTimeout(performRefresh(ctx), REFRESH_TIMEOUT_MS, 'refresh')
+          state.last = {
+            at: Date.now(),
+            ok: result.ok,
+            added: result.added,
+            removed: result.removed,
+            updated: result.updated,
+            errors: result.errors,
+          }
+          sendJson(response, result.ok ? 200 : 502, result)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          state.last = { at: Date.now(), ok: false, errors: [message], added: [], removed: [], updated: [] }
+          sendJson(response, 502, {
+            ok: false,
+            error: message,
+            added: [],
+            removed: [],
+            updated: [],
+            errors: [message],
+            clientGraphChanged: false,
+          })
+        } finally {
+          state.refreshing = false
+        }
+      },
+    }),
+  ]
+  return () => {
+    for (const dispose of disposers) dispose()
+  }
+}
+
+/**
+ * Cordis plugin entry.
+ * @param {import('@deepseek-ai/cordis').Context} ctx
+ */
+export function apply(ctx) {
+  const state = { refreshing: false, last: null }
+  ctx.effect(() => registerRoutes(ctx, state), 'dsh-live-reload: http routes')
+}
