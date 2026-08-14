@@ -95,6 +95,26 @@ exactly, including the two boot-only overlays most reimplementations forget:
   modules (rc-era releases included).
 - Windows / macOS / Linux — pure Node ESM host, zero native deps.
 
+## Verification
+
+`dsh-live-reload` was verified end-to-end on a real booted instance, isolated
+from the working one (own `DSH_HOME`, OS-assigned port, `node_modules`
+junctioned to the installation fallback):
+
+- `GET /dsh-live-reload/status` → `200`, correct profile.
+- `POST /dsh-live-reload/refresh` → `200 {ok: true}`, zero changes, repeated
+  refreshes stable (no churn).
+- Appending a new bundle to `dsh.profile.bundles` then refreshing →
+  `added: ["<row>"]`, `errors: []` — the row mounts **live**, audit clean.
+- Removing it then refreshing → `removed: ["<row>"]` — the row disposes live.
+- `GET /plugins/dsh-live-reload/client.js` → `200`; the boot manifest
+  (`window.__DSH_BOOT__`) carries the `dsh-live-reload` client entry.
+
+The composition logic is additionally cross-checked against the launcher's own
+`dsh --profile <name> --dump-config` output by
+`node scripts/validate-composition.mjs <profile>` (row-identical, including the
+agent-presets shipped-roots overlay and the telemetry switch).
+
 ## Known interactions
 
 The built-in HMR watcher recomposes on every `cordis.patch.yml` save from the

@@ -86,6 +86,23 @@ curl -s -X POST -H 'origin: http://127.0.0.1:3080' http://127.0.0.1:3080/dsh-liv
 - 不锁定 `dsh.bundle` 版本:兼容提供回退模块的任何 Harness 版本(含 rc 版)。
 - Windows / macOS / Linux —— 纯 Node ESM 宿主,零原生依赖。
 
+## 验证
+
+`dsh-live-reload` 已在真实启动的隔离实例上完成端到端验证(独立 `DSH_HOME`、OS 分配端口、
+`node_modules` 通过 junction 共享安装回退):
+
+- `GET /dsh-live-reload/status` → `200`,profile 正确。
+- `POST /dsh-live-reload/refresh` → `200 {ok: true}`,零变化,重复刷新稳定(无抖动)。
+- 向 `dsh.profile.bundles` 追加新 bundle 后刷新 → `added: ["<行>"]`、`errors: []`
+  —— 该行**即时挂载**,审计干净。
+- 移除后再刷新 → `removed: ["<行>"]` —— 该行即时卸载。
+- `GET /plugins/dsh-live-reload/client.js` → `200`;启动清单(`window.__DSH_BOOT__`)
+  携带 `dsh-live-reload` 客户端条目。
+
+组合逻辑另与 launcher 自己的 `dsh --profile <name> --dump-config` 输出做逐行交叉校验
+(`node scripts/validate-composition.mjs <profile>`),含 agent-presets 系统预设根覆盖层与
+telemetry 开关。
+
 ## 已知交互
 
 内置 HMR watcher 每次保存 `cordis.patch.yml` 时,用的是**启动时捕获**的 bundle 集合来重组。
