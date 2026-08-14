@@ -377,6 +377,11 @@ function fingerprintPackage(packageDir) {
  * → start), which is exactly what an in-place reinstall needs and what the
  * reported "tool already registered" collision was missing.
  *
+ * The busted URL is REMEMBERED per package (bustedNames): once a package has
+ * been busted, every later refresh rewrites its rows to the same URL (stable
+ * until the next on-disk change computes a new rev), so the row never flips
+ * back to the plain package-name specifier and refreshes stay churn-free.
+ *
  * Only rows whose `name` is the package name itself are rewritten (the
  * market-plugin pattern, e.g. `dsh-chat-import`, `@liustack/modlens`); the
  * plugin's own package is never busted (re-importing the code that is
@@ -385,16 +390,24 @@ function fingerprintPackage(packageDir) {
  * @param {NodeJS.Require} requireProfile - profile-anchored resolver.
  * @param {string[]} changed - bundle package names whose files changed.
  * @param {Map<string, string>} packageHashes - name → current fingerprint.
- * @returns {string[]} the busted entry URLs applied to rows.
+ * @param {Map<string, string>} bustedNames - name → busted entry URL (persisted).
+ * @param {string[]} currentBundles - package names in the profile manifest now.
+ * @returns {string[]} the busted entry URLs applied to rows this pass.
  */
-function bustChangedPackageRows(patches, requireProfile, changed, packageHashes) {
-  const busted = []
+function bustChangedPackageRows(patches, requireProfile, changed, packageHashes, bustedNames, currentBundles) {
+  // Changed packages get a fresh busted URL for their current on-disk revision.
   for (const name of changed) {
     if (name === BIN) continue
     let entryFile
     try { entryFile = requireProfile.resolve(name) } catch { continue }
     const rev = createHash('sha256').update(packageHashes.get(name) ?? name).digest('hex').slice(0, 12)
-    const url = `${pathToFileURL(entryFile).href}?dshr=${rev}`
+    bustedNames.set(name, `${pathToFileURL(entryFile).href}?dshr=${rev}`)
+  }
+  // Previously busted packages keep their remembered URL (stable, no churn);
+  // packages that left the profile are pruned.
+  const applied = []
+  for (const [name, url] of bustedNames) {
+    if (!currentBundles.includes(name)) { bustedNames.delete(name); continue }
     let hit = 0
     for (const patch of patches) {
       if (!Array.isArray(patch?.insert)) continue
@@ -402,9 +415,9 @@ function bustChangedPackageRows(patches, requireProfile, changed, packageHashes)
         if (row?.name === name) { row.name = url; hit += 1 }
       }
     }
-    if (hit > 0) busted.push(url)
+    if (hit > 0) applied.push(url)
   }
-  return busted
+  return applied
 }
 
 /**
@@ -458,7 +471,9 @@ async function performRefresh(ctx, state) {
   // collision, no restart.
   const changed = syncPackageFingerprints(profileDir, state.packageHashes, false)
   const requireProfile = requireFromProfile(profileDir)
-  const busted = bustChangedPackageRows(patches, requireProfile, changed, state.packageHashes)
+  const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  const currentBundles = manifest.dsh?.profile?.bundles ?? []
+  const busted = bustChangedPackageRows(patches, requireProfile, changed, state.packageHashes, state.bustedNames, currentBundles)
 
   const before = snapshotEntries(ctx)
   const clientModules = ctx.get('clientModules')
@@ -621,7 +636,7 @@ function registerRoutes(ctx, state) {
  * @param {import('@deepseek-ai/cordis').Context} ctx
  */
 export function apply(ctx) {
-  const state = { refreshing: false, last: null, packageHashes: new Map() }
+  const state = { refreshing: false, last: null, packageHashes: new Map(), bustedNames: new Map() }
   const disposers = []
 
   const tryRegister = () => {

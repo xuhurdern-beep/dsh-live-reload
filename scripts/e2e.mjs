@@ -379,6 +379,12 @@ async function main() {
       'updatedOnDisk reports the changed bundle', `updatedOnDisk=${JSON.stringify(updated.body.updatedOnDisk ?? [])}`)
     check(readUpdateMark() === 'v2', 'FRESH code is live after cache eviction (marker v2)', `mark=${readUpdateMark()}`)
 
+    // The busted URL is remembered: a follow-up refresh with no disk changes
+    // must be churn-free (the row must NOT flip back to the plain specifier).
+    const updateStable = await refresh(url)
+    check(updateStable.status === 200 && updateStable.body.ok === true && updateStable.body.updated?.length === 0,
+      'refresh after bust → zero changes (busted name remembered, no churn)', JSON.stringify(updateStable.body))
+
     // restore v1 and unmount — leaves the repo fixture at v1 and the state clean
     writeUpdateFixture('v1')
     const updateRestored = await refresh(url)

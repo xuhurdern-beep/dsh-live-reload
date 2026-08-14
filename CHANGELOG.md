@@ -76,6 +76,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - In-place updates no longer fail with "tool already registered": the busted
   row name forces the loader's replace path, whose dispose-before-start order
   withdraws the old fiber's registrations before the new apply runs.
+- The busted row name is remembered per package: without persistence the next
+  refresh would flip the row back to the plain package-name specifier —
+  re-importing the boot-time module (reverting a real reinstall's new code)
+  and churning `updated` on every refresh. Busted rows now stay stable until
+  the next on-disk change computes a new rev.
 
 ## [0.1.0] - 2026-08-15
 
