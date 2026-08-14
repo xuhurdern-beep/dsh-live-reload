@@ -133,7 +133,8 @@ check(freshAgent !== undefined, 'agent-presets row exists')
 if (freshAgent !== undefined) {
   const roots = freshAgent.config?.roots
   const shipped = Array.isArray(roots)
-    ? roots.find(r => r?.trust === 'system' && String(r.path).replaceAll('\\', '/').endsWith('config/agent-presets'))
+    ? roots.find(r => r?.trust === 'system'
+      && String(r.path).replaceAll('\\', '/').replace(/\/+$/, '').endsWith('config/agent-presets'))
     : undefined
   check(shipped !== undefined, `agent-presets carries the shipped system root (${shipped?.path ?? 'missing'})`)
   // The dump's agent-presets row + the same roots override must equal the fresh row.

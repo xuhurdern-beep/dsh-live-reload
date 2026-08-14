@@ -21,7 +21,7 @@
 import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, sep } from 'node:path'
 import { homedir } from 'node:os'
 
 export const name = 'dsh-live-reload'
@@ -210,7 +210,12 @@ export async function composeFresh(profileDir, home = dshHome()) {
   )
 
   // 4. agent-presets shipped-roots overlay: without it a refresh would drop
-  //    the installation's own preset root from the live roster.
+  //    the installation's own preset root from the live roster. The path
+  //    mirrors the launcher's SHIPPED_PRESET_ROOT exactly —
+  //    `fileURLToPath(new URL('../config/agent-presets/', import.meta.url))`
+  //    INCLUDING the trailing separator: a byte-identical row means the first
+  //    refresh reports zero churn instead of a cosmetic one-time `updated`
+  //    entry (observed before this fix as `updated: ["agent-presets"]`).
   if (rows.has('agent-presets')) {
     const appDir = dshAppDir(requireProfile)
     if (appDir !== undefined) {
@@ -218,7 +223,7 @@ export async function composeFresh(profileDir, home = dshHome()) {
         id: 'agent-presets',
         config: {
           ...(rows.get('agent-presets')?.config ?? {}),
-          roots: [{ path: join(appDir, 'config', 'agent-presets'), trust: 'system' }],
+          roots: [{ path: join(appDir, 'config', 'agent-presets') + sep, trust: 'system' }],
         },
       })
     }
@@ -247,10 +252,32 @@ function findRootInclude(ctx) {
   return undefined
 }
 
+/**
+ * Stable JSON stringify: object keys are sorted recursively, so two
+ * semantically equal values with different key insertion order never diff.
+ * (Loader entry configs are plain JSON from patches — no cycles, no functions.)
+ * @param {unknown} value
+ * @returns {string}
+ */
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
+  if (value !== null && typeof value === 'object') {
+    const keys = Object.keys(value).sort()
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
 /** Fingerprint of one loader row's effective options (scalar data only). */
 function fingerprintEntry(entry) {
   const o = entry.options
-  return JSON.stringify([o.name, o.disabled ?? null, o.inject ?? null, o.group ?? null, o.config ?? null])
+  return JSON.stringify([
+    o.name,
+    o.disabled ?? null,
+    o.inject ?? null,
+    o.group ?? null,
+    o.config === undefined || o.config === null ? null : stableStringify(o.config),
+  ])
 }
 
 /**
