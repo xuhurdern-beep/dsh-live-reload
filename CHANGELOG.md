@@ -64,6 +64,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bustedRowUrls`. The plugin's own package is excluded (self-update is not
   transactional).
 - The client result panel shows the hot-loaded `updatedOnDisk` packages.
+- **Collision self-heal**: when an include update fails with
+  `tool "X" is already registered` (a re-applied row colliding with a
+  still-live registration even though its files did not change), the refresh
+  identifies the offending package from the error, force-busts its module
+  cache (a fresh cache key via a monotonic counter), and retries the
+  composition ONCE — the replace path disposes the old fiber (withdrawing the
+  registration) before the fresh apply. Reported via `selfHealed`. Genuine
+  conflicts with other packages are not masked (the retry re-fails and the
+  original error is surfaced).
 
 ### Changed
 

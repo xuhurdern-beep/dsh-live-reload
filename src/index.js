@@ -449,6 +449,40 @@ function syncPackageFingerprints(profileDir, packageHashes, seed) {
 }
 
 /**
+ * Extract the offending package from a "tool ... is already registered" apply
+ * failure, e.g. `... failed to apply loader entry import-claude (dsh-chat-import):
+ * tool "import_claude" is already registered (...)` → `dsh-chat-import`.
+ * @param {unknown} error
+ * @returns {string | undefined} the package name, or undefined when the error
+ * is not a tool-registration collision.
+ */
+function collisionPackage(error) {
+  const message = error instanceof Error ? error.message : String(error)
+  const match = message.match(/failed to apply loader entry \S+ \(([^)]+)\):\s*tool "[^"]+" is already registered/)
+  return match?.[1]
+}
+
+/**
+ * Force a new cache-busted entry URL for one package, even when its files did
+ * NOT change on disk (a monotonic counter guarantees a fresh cache key). Used
+ * by the collision self-heal: a re-applied row that collides with a still-live
+ * registration gets a forced bust so the retry re-imports a fresh ModuleJob —
+ * the loader's dispose-before-start order then withdraws the old registration.
+ * @param {NodeJS.Require} requireProfile - profile-anchored resolver.
+ * @param {string} packageName
+ * @param {{bustCounter: number}} state
+ * @returns {string | undefined} the busted entry URL, or undefined when the
+ * package entry cannot be resolved.
+ */
+function forceBustUrl(requireProfile, packageName, state) {
+  let entryFile
+  try { entryFile = requireProfile.resolve(packageName) } catch { return undefined }
+  state.bustCounter += 1
+  const rev = createHash('sha256').update(`${packageName}:${state.bustCounter}:${Date.now()}`).digest('hex').slice(0, 12)
+  return `${pathToFileURL(entryFile).href}?dshr=${rev}`
+}
+
+/**
  * Perform one restart-free composition refresh.
  * @param {import('@deepseek-ai/cordis').Context} ctx
  * @param {{refreshing: boolean, last: object | null, packageHashes: Map<string, string>}} state
@@ -483,8 +517,48 @@ async function performRefresh(ctx, state) {
   // cordis.patch.yml save: swap the include's patch stack and let the loader
   // reconcile the tree (mount new rows, config-update changed rows, dispose
   // removed rows, roll back on failure).
-  const { patches: _previous, ...includeConfig } = include.options.config ?? {}
-  await include.update({ config: { ...includeConfig, patches } })
+  const applyComposition = async () => {
+    const { patches: _previous, ...includeConfig } = include.options.config ?? {}
+    await include.update({ config: { ...includeConfig, patches } })
+  }
+
+  let selfHealed = []
+  try {
+    await applyComposition()
+  } catch (error) {
+    // Collision self-heal: a re-applied row that registers a tool name still
+    // held by its previous fiber fails with "already registered". Force-bust
+    // the offending package (a fresh cache key even when its files did not
+    // change), rewrite its rows in the patch stack, and retry ONCE — the
+    // replace path then disposes the old fiber (withdrawing the registration)
+    // before the fresh apply runs. Genuine conflicts with other packages are
+    // NOT masked: the retry re-fails and the original error is rethrown.
+    const pkg = collisionPackage(error)
+    if (pkg !== undefined && pkg !== BIN) {
+      const url = forceBustUrl(requireProfile, pkg, state)
+      if (url !== undefined) {
+        state.bustedNames.set(pkg, url)
+        for (const patch of patches) {
+          if (!Array.isArray(patch?.insert)) continue
+          for (const row of patch.insert) {
+            if (row?.name === pkg) row.name = url
+          }
+        }
+        try {
+          await applyComposition()
+          selfHealed = [pkg]
+          busted.push(url)
+        } catch {
+          // The retry failed too — a genuine conflict; surface the original error.
+          throw error
+        }
+      } else {
+        throw error
+      }
+    } else {
+      throw error
+    }
+  }
 
   // Let the loader flush remaining lifecycle tasks and the client-modules
   // graph settle, then audit + diff.
@@ -504,6 +578,9 @@ async function performRefresh(ctx, state) {
     // Packages whose files changed on disk since the last snapshot; their rows
     // were cache-busted and re-applied with the fresh code (bustedRowUrls).
     ...(changed.length > 0 ? { updatedOnDisk: changed, bustedRowUrls: busted } : {}),
+    // A "tool already registered" collision was healed by a forced cache-bust
+    // + a single retry (the offending package's rows were re-applied fresh).
+    ...(selfHealed.length > 0 ? { selfHealed } : {}),
   }
 }
 
@@ -636,7 +713,7 @@ function registerRoutes(ctx, state) {
  * @param {import('@deepseek-ai/cordis').Context} ctx
  */
 export function apply(ctx) {
-  const state = { refreshing: false, last: null, packageHashes: new Map(), bustedNames: new Map() }
+  const state = { refreshing: false, last: null, packageHashes: new Map(), bustedNames: new Map(), bustCounter: 0 }
   const disposers = []
 
   const tryRegister = () => {

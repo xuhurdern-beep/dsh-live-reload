@@ -34,6 +34,10 @@ transactionally, rolling back on failure. Only the rows that actually changed ar
   refresh re-points its loader rows at a cache-busted entry URL, so the loader re-imports
   and runs the NEW code — no restart, and no "tool already registered" collision (the
   loader withdraws the old fiber's registrations before starting the new one).
+- **Collision self-heal (0.2.0)** — if a refresh still hits
+  `tool "X" is already registered` (a re-applied row whose files did not change), the
+  plugin identifies the offending package, force-busts its module cache and retries once
+  — the collision heals itself without a restart (`selfHealed` in the result).
 
 ## Install
 
