@@ -10,7 +10,8 @@
  * dispatch / boot manifest / clientGraphChanged=true path / the P0-2 audit
  * (does the first refresh still touch `agent-presets`? does the boot-time
  * loader row match a fresh recomposition?) / a conflicting bundle that cannot
- * activate → loud failure, transactional rollback, and clean recovery.
+ * activate → loud failure, transactional rollback, and clean recovery / an
+ * in-place package update → cache-busted re-import runs the FRESH code.
  *
  * Usage: node scripts/e2e.mjs
  * Exit code: 0 = every check passed; non-zero otherwise.
@@ -35,6 +36,81 @@ const profileName = `web-e2e-${process.pid}`
 const profileDir = join(realHome, 'profiles', profileName)
 const bootLog = join(profileDir, 'boot.log')
 const probeOut = join(profileDir, 'probe-agent-presets.json')
+const updateMark = join(profileDir, 'update-mark.txt')
+const updateBundleDir = join(REPO, 'e2e', 'bundles', 'e2e-update-bundle')
+
+/** The e2e-update-bundle fixture content for a given generation (v1/v2). */
+const UPDATE_FIXTURE = {
+  v1: {
+    js: `// e2e fixture v1 — registers a probe tool and writes a marker file so the
+// test can tell which code generation actually ran.
+import { writeFileSync } from 'node:fs'
+
+export const name = 'e2e-update-bundle'
+export const inject = ['tools']
+export function apply(ctx) {
+  ctx.tools.register({
+    name: 'update_probe',
+    description: 'e2e update probe (v1)',
+    parameters: { type: 'object', properties: { q: { type: 'string' } }, required: ['q'], additionalProperties: false },
+    output: {
+      schema: { type: 'object', properties: { ok: { type: 'boolean' } }, additionalProperties: false },
+      render: () => [{ type: 'text', text: 'ok' }],
+    },
+    execute: async () => ({ ok: true }),
+  })
+  writeFileSync(process.env.DSH_E2E_UPDATE_MARK, 'v1')
+}
+`,
+    patch: `# e2e fixture v1: one host row registering a probe tool and writing a marker.
+- insert:
+    - id: update-row
+      name: 'e2e-update-bundle'
+`,
+  },
+  v2: {
+    js: `// e2e fixture v2 — SAME tool name as v1: after cache eviction the loader's
+// dispose-before-start order must withdraw the old registration instead of
+// colliding, and the fresh import must run THIS code.
+import { writeFileSync } from 'node:fs'
+
+export const name = 'e2e-update-bundle'
+export const inject = ['tools']
+export function apply(ctx) {
+  ctx.tools.register({
+    name: 'update_probe',
+    description: 'e2e update probe (v2)',
+    parameters: { type: 'object', properties: { q: { type: 'string' } }, required: ['q'], additionalProperties: false },
+    output: {
+      schema: { type: 'object', properties: { ok: { type: 'boolean' } }, additionalProperties: false },
+      render: () => [{ type: 'text', text: 'ok' }],
+    },
+    execute: async () => ({ ok: true }),
+  })
+  writeFileSync(process.env.DSH_E2E_UPDATE_MARK, 'v2')
+}
+`,
+    patch: `# e2e fixture v2 — an explicit row-level inject changes the row options, so
+# the loader takes the REPLACE path (re-import + dispose + re-start) — the
+# path the reported dsh-chat-import reinstall hit.
+- insert:
+    - id: update-row
+      name: 'e2e-update-bundle'
+      inject:
+        - tools
+`,
+  },
+}
+
+/** Write the e2e-update-bundle fixture at a given generation (v1/v2). */
+function writeUpdateFixture(generation) {
+  writeFileSync(join(updateBundleDir, 'update.js'), UPDATE_FIXTURE[generation].js, 'utf8')
+  writeFileSync(join(updateBundleDir, 'cordis.patch.yml'), UPDATE_FIXTURE[generation].patch, 'utf8')
+}
+
+function readUpdateMark() {
+  try { return readFileSync(updateMark, 'utf8').trim() } catch { return '(missing)' }
+}
 
 let failures = 0
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
@@ -83,7 +159,7 @@ function setBundles(bundles) {
 /** Remove junctions first (unlink removes the reparse point, not the target), then the profile dir. */
 function cleanup(child) {
   try { child?.kill() } catch { /* already gone */ }
-  const junctions = ['dsh-live-reload', 'e2e-bundle', 'e2e-client-bundle', 'e2e-conflict-bundle']
+  const junctions = ['dsh-live-reload', 'e2e-bundle', 'e2e-client-bundle', 'e2e-conflict-bundle', 'e2e-update-bundle']
   for (const name of junctions) {
     try { unlinkSync(join(profileDir, 'node_modules', name)) } catch { /* absent */ }
   }
@@ -109,6 +185,7 @@ async function main() {
       'e2e-bundle': `link:${join(REPO, 'e2e', 'bundles', 'e2e-bundle').replaceAll('\\', '/')}`,
       'e2e-client-bundle': `link:${join(REPO, 'e2e', 'bundles', 'e2e-client-bundle').replaceAll('\\', '/')}`,
       'e2e-conflict-bundle': `link:${join(REPO, 'e2e', 'bundles', 'e2e-conflict-bundle').replaceAll('\\', '/')}`,
+      'e2e-update-bundle': `link:${join(REPO, 'e2e', 'bundles', 'e2e-update-bundle').replaceAll('\\', '/')}`,
     },
     dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-live-reload'] } },
   }, null, 2) + '\n', 'utf8')
@@ -153,12 +230,14 @@ async function main() {
   ].join('\n'), 'utf8')
 
   // profile node_modules: the same link:/junction layout `dsh plugin add link:` produces.
-  for (const name of ['dsh-live-reload', 'e2e-bundle', 'e2e-client-bundle', 'e2e-conflict-bundle']) {
+  for (const name of ['dsh-live-reload', 'e2e-bundle', 'e2e-client-bundle', 'e2e-conflict-bundle', 'e2e-update-bundle']) {
     const target = name === 'dsh-live-reload'
       ? REPO
       : join(REPO, 'e2e', 'bundles', name)
     symlinkSync(target, join(profileDir, 'node_modules', name), 'junction')
   }
+  // e2e-update-bundle starts at v1 (the fixture is rewritten mid-test and restored in teardown).
+  writeUpdateFixture('v1')
   check(true, 'profile scaffold + link:/junction layout created')
   } catch (scaffoldError) {
     cleanup(undefined)
@@ -171,7 +250,7 @@ async function main() {
     const fd = openSync(bootLog, 'w')
     child = spawn(process.execPath, [resolveLauncher(), '--profile', profileName], {
       cwd: realHome,
-      env: { ...process.env, DSH_TELEMETRY_DISABLED: '1', DSH_E2E_PROBE_OUT: probeOut },
+      env: { ...process.env, DSH_TELEMETRY_DISABLED: '1', DSH_E2E_PROBE_OUT: probeOut, DSH_E2E_UPDATE_MARK: updateMark },
       stdio: ['ignore', fd, 'inherit'],
     })
 
@@ -280,6 +359,35 @@ async function main() {
       && recovered.body.removed?.length === 0,
       'removing the conflicting bundle → refresh recovers (zero changes)', JSON.stringify(recovered.body))
 
+    // --- 5c. in-place package update → cache eviction re-imports fresh code ------
+    // Mirrors the reported dsh-chat-import reinstall case: a MOUNTED bundle
+    // whose package files change on disk must re-import FRESH code after the
+    // refresh evicts the loader's module cache — and re-applying a row that
+    // registers the SAME tool name must not collide (the loader disposes the
+    // old fiber, withdrawing its tool, before starting the new one).
+    setBundles(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-live-reload', 'e2e-update-bundle'])
+    const updateMounted = await refresh(url)
+    check(updateMounted.status === 200 && updateMounted.body.ok === true && (updateMounted.body.added ?? []).includes('update-row'),
+      'mount update bundle → row hot-mounts (v1)', JSON.stringify(updateMounted.body))
+    check(readUpdateMark() === 'v1', 'v1 code is live (marker v1)', `mark=${readUpdateMark()}`)
+
+    writeUpdateFixture('v2') // in-place "market reinstall": files change on disk
+    const updated = await refresh(url)
+    check(updated.status === 200 && updated.body.ok === true && (updated.body.updated ?? []).includes('update-row'),
+      'in-place update → row re-applied (updated includes update-row)', JSON.stringify(updated.body))
+    check((updated.body.updatedOnDisk ?? []).includes('e2e-update-bundle'),
+      'updatedOnDisk reports the changed bundle', `updatedOnDisk=${JSON.stringify(updated.body.updatedOnDisk ?? [])}`)
+    check(readUpdateMark() === 'v2', 'FRESH code is live after cache eviction (marker v2)', `mark=${readUpdateMark()}`)
+
+    // restore v1 and unmount — leaves the repo fixture at v1 and the state clean
+    writeUpdateFixture('v1')
+    const updateRestored = await refresh(url)
+    check(updateRestored.status === 200 && updateRestored.body.ok === true, 'restore v1 + refresh → ok', JSON.stringify(updateRestored.body))
+    setBundles(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-live-reload'])
+    const updateUnmounted = await refresh(url)
+    check(updateUnmounted.status === 200 && updateUnmounted.body.ok === true && (updateUnmounted.body.removed ?? []).includes('update-row'),
+      'unmount update bundle → row hot-disposes', JSON.stringify(updateUnmounted.body))
+
     // --- 6. own client dispatch + boot manifest -----------------------------
     try {
       const ownClient = await fetch(`${url}/plugins/dsh-live-reload/client.js`)
@@ -296,6 +404,7 @@ async function main() {
     }
   } finally {
     // --- 7. teardown ---------------------------------------------------------
+    try { writeUpdateFixture('v1') } catch { /* fixture restore is best-effort */ }
     if (child !== undefined && child.exitCode === null) {
       await new Promise(resolve => {
         const timer = setTimeout(() => { child.kill('SIGKILL'); resolve() }, 10_000)

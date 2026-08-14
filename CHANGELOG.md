@@ -49,6 +49,34 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   agent-presets audit); wired into `npm test`.
 - e2e fixture bundles under `e2e/bundles/` (`e2e-bundle`, `e2e-client-bundle`).
 
+## [0.2.0] - 2026-08-15
+
+### Added
+
+- **Hot package updates**: the refresh fingerprints every bundle package on disk
+  (seeded at boot-settle). When a mounted package's files change in place
+  (market reinstall/update), its loader rows are re-pointed at a cache-busted
+  entry URL (`<entry>?dshr=<rev>`), so the loader re-imports and runs the NEW
+  code through its replace path — which disposes the old fiber (withdrawing its
+  tool registrations) before starting the new one, eliminating the reported
+  `tool "X" is already registered` collision and the restart requirement for
+  in-place package updates. The result reports `updatedOnDisk` and
+  `bustedRowUrls`. The plugin's own package is excluded (self-update is not
+  transactional).
+- The client result panel shows the hot-loaded `updatedOnDisk` packages.
+
+### Changed
+
+- Version bumped to 0.2.0. README "What still needs a restart" narrowed: only a
+  changed package whose loader row is otherwise identical still needs a restart
+  (nothing to re-apply; reported via `updatedOnDisk`).
+
+### Fixed
+
+- In-place updates no longer fail with "tool already registered": the busted
+  row name forces the loader's replace path, whose dispose-before-start order
+  withdraws the old fiber's registrations before the new apply runs.
+
 ## [0.1.0] - 2026-08-15
 
 Initial release: one-click restart-free refresh of the running DSH plugin

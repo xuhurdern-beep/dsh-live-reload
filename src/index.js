@@ -19,9 +19,10 @@
  */
 
 import { createRequire } from 'node:module'
-import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { basename, dirname, join, sep } from 'node:path'
+import { basename, dirname, join, relative, sep } from 'node:path'
 import { homedir } from 'node:os'
 
 export const name = 'dsh-live-reload'
@@ -335,11 +336,112 @@ function auditEntries(ctx) {
 }
 
 /**
+ * Fingerprint one installed bundle package on disk: every file's size and
+ * mtime under the package dir (nested node_modules/.git skipped). Detects
+ * in-place package updates (market reinstall/update rewrites the files) so a
+ * refresh can load the new code instead of the loader's cached module.
+ * @param {string} packageDir - absolute package directory.
+ * @returns {string} deterministic fingerprint ('' for an unreadable dir).
+ */
+function fingerprintPackage(packageDir) {
+  const parts = []
+  const seen = new Set()
+  const walk = (dir) => {
+    let entries
+    try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const entry of entries) {
+      if (entry.name === 'node_modules' || entry.name === '.git') continue
+      const full = join(dir, entry.name)
+      if (seen.has(full)) continue
+      seen.add(full)
+      if (entry.isDirectory()) { walk(full); continue }
+      let st
+      try { st = statSync(full) } catch { continue }
+      parts.push(`${relative(packageDir, full).replaceAll('\\', '/')}:${st.size}:${Math.trunc(st.mtimeMs)}`)
+    }
+  }
+  walk(packageDir)
+  parts.sort()
+  return parts.join('|')
+}
+
+/**
+ * Rewrite the loader rows of every CHANGED package to a cache-busted entry
+ * URL. The loader imports each row through Node's internal ESM ModuleLoader,
+ * which caches module jobs keyed by the resolved URL — so an in-place package
+ * update keeps serving the pre-update code (module-level HMR is disabled on
+ * the web surface). Pointing the row at its own entry file with a `?dshr=<rev>`
+ * query creates a NEW cache key per on-disk revision: the next import reads
+ * the FRESH files. The name change also forces the loader's REPLACE path
+ * (re-import → dispose the old fiber — withdrawing its tool registrations —
+ * → start), which is exactly what an in-place reinstall needs and what the
+ * reported "tool already registered" collision was missing.
+ *
+ * Only rows whose `name` is the package name itself are rewritten (the
+ * market-plugin pattern, e.g. `dsh-chat-import`, `@liustack/modlens`); the
+ * plugin's own package is never busted (re-importing the code that is
+ * executing the refresh mid-flight is not transactional).
+ * @param {object[]} patches - the fresh patch stack (mutated in place).
+ * @param {NodeJS.Require} requireProfile - profile-anchored resolver.
+ * @param {string[]} changed - bundle package names whose files changed.
+ * @param {Map<string, string>} packageHashes - name → current fingerprint.
+ * @returns {string[]} the busted entry URLs applied to rows.
+ */
+function bustChangedPackageRows(patches, requireProfile, changed, packageHashes) {
+  const busted = []
+  for (const name of changed) {
+    if (name === BIN) continue
+    let entryFile
+    try { entryFile = requireProfile.resolve(name) } catch { continue }
+    const rev = createHash('sha256').update(packageHashes.get(name) ?? name).digest('hex').slice(0, 12)
+    const url = `${pathToFileURL(entryFile).href}?dshr=${rev}`
+    let hit = 0
+    for (const patch of patches) {
+      if (!Array.isArray(patch?.insert)) continue
+      for (const row of patch.insert) {
+        if (row?.name === name) { row.name = url; hit += 1 }
+      }
+    }
+    if (hit > 0) busted.push(url)
+  }
+  return busted
+}
+
+/**
+ * Record every bundle package's on-disk fingerprint and report the packages
+ * that changed since the last snapshot. Seeded at boot-settle so a package
+ * replaced AFTER boot (market reinstall) is detected on the very first
+ * refresh. The plugin's own package is excluded (self-update is not
+ * transactional).
+ * @param {string} profileDir - absolute profile directory.
+ * @param {Map<string, string>} packageHashes - state.packageHashes.
+ * @param {boolean} seed - true to only record fingerprints (boot snapshot).
+ * @returns {string[]} bundle package names whose files changed on disk.
+ */
+function syncPackageFingerprints(profileDir, packageHashes, seed) {
+  const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  const bundles = manifest.dsh?.profile?.bundles ?? []
+  const requireProfile = requireFromProfile(profileDir)
+  const changed = []
+  for (const name of bundles) {
+    if (name === BIN) continue
+    let dir
+    try { dir = resolveBundleDir(requireProfile, name) } catch { continue }
+    const fp = fingerprintPackage(dir)
+    const previous = packageHashes.get(name)
+    packageHashes.set(name, fp)
+    if (!seed && previous !== undefined && previous !== fp) changed.push(name)
+  }
+  return changed
+}
+
+/**
  * Perform one restart-free composition refresh.
  * @param {import('@deepseek-ai/cordis').Context} ctx
+ * @param {{refreshing: boolean, last: object | null, packageHashes: Map<string, string>}} state
  * @returns {Promise<object>} JSON-safe result for the route and status page.
  */
-async function performRefresh(ctx) {
+async function performRefresh(ctx, state) {
   const profileDir = profileDirOf(ctx)
   const patches = await composeFresh(profileDir)
 
@@ -347,6 +449,16 @@ async function performRefresh(ctx) {
   if (include === undefined) {
     throw new Error(`${BIN}: root Include entry not found — cannot live-apply the composition`)
   }
+
+  // In-place bundle updates: any package whose files changed on disk since
+  // boot/the last refresh gets its loader rows re-pointed at a cache-busted
+  // entry URL, so the reconcile below re-imports and runs the NEW code. The
+  // loader's replace path disposes the old fiber (withdrawing its tool
+  // registrations) BEFORE starting the new one — no "already registered"
+  // collision, no restart.
+  const changed = syncPackageFingerprints(profileDir, state.packageHashes, false)
+  const requireProfile = requireFromProfile(profileDir)
+  const busted = bustChangedPackageRows(patches, requireProfile, changed, state.packageHashes)
 
   const before = snapshotEntries(ctx)
   const clientModules = ctx.get('clientModules')
@@ -374,6 +486,9 @@ async function performRefresh(ctx) {
     ...diffEntries(before, after),
     errors,
     clientGraphChanged: revBefore !== undefined && revAfter !== undefined && revBefore !== revAfter,
+    // Packages whose files changed on disk since the last snapshot; their rows
+    // were cache-busted and re-applied with the fresh code (bustedRowUrls).
+    ...(changed.length > 0 ? { updatedOnDisk: changed, bustedRowUrls: busted } : {}),
   }
 }
 
@@ -462,7 +577,7 @@ function registerRoutes(ctx, state) {
         }
         state.refreshing = true
         try {
-          const result = await withTimeout(performRefresh(ctx), REFRESH_TIMEOUT_MS, 'refresh')
+          const result = await withTimeout(performRefresh(ctx, state), REFRESH_TIMEOUT_MS, 'refresh')
           state.last = {
             at: Date.now(),
             ok: result.ok,
@@ -506,7 +621,7 @@ function registerRoutes(ctx, state) {
  * @param {import('@deepseek-ai/cordis').Context} ctx
  */
 export function apply(ctx) {
-  const state = { refreshing: false, last: null }
+  const state = { refreshing: false, last: null, packageHashes: new Map() }
   const disposers = []
 
   const tryRegister = () => {
@@ -525,12 +640,19 @@ export function apply(ctx) {
   unsubPlugin = ctx.on('internal/plugin', onPlugin)
 
   // (2) Also re-check once the whole tree has settled (covers non-entry
-  //     providers and guarantees webServer is up if it ever will be).
+  //     providers and guarantees webServer is up if it ever will be), and
+  //     record the boot-time package fingerprints so the first refresh can
+  //     spot bundles replaced on disk after boot.
   void Promise.resolve().then(async () => {
     try {
       await ctx.get('loader')?.await()
     } catch {
       // the tree settled into failure; the internal/plugin path keeps trying
+    }
+    try {
+      syncPackageFingerprints(profileDirOf(ctx), state.packageHashes, true)
+    } catch {
+      // hand-built tree without a profile — cache busting stays off
     }
     if (tryRegister()) unsubPlugin()
   })

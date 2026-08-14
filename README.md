@@ -29,6 +29,11 @@ transactionally, rolling back on failure. Only the rows that actually changed ar
   errors, and offers a page reload only when new client bundles appeared.
 - **No process exit** — the host keeps running; sessions replay their history from the
   persisted log after a page reload (the web app's standard reload recovery).
+- **Hot package updates (0.2.0)** — every bundle is fingerprinted on disk (seeded at
+  boot); when a mounted package's files change in place (market reinstall/update), the
+  refresh re-points its loader rows at a cache-busted entry URL, so the loader re-imports
+  and runs the NEW code — no restart, and no "tool already registered" collision (the
+  loader withdraws the old fiber's registrations before starting the new one).
 
 ## Install
 
@@ -132,9 +137,12 @@ everything fresh and re-applies the full composition.
 
 ## What still needs a restart
 
-- **Updating an already-installed package to a new version** (the loader's module cache
-  serves the old code for the same package name; module-level HMR is disabled on the web
-  surface).
+- **Updating an already-installed package whose loader rows are otherwise
+  unchanged**: the refresh fingerprints every bundle on disk and cache-busts
+  the rows of changed packages (0.2.0) — a reinstall/update whose rows get
+  re-applied hot-loads the new code. A package whose loader row is *identical*
+  before/after the update has nothing to re-apply, so the new code still needs
+  a restart (the refresh reports it via `updatedOnDisk`).
 - Changing the web frontend shell itself or the `dsh` binary.
 - The very first activation of this plugin (after install).
 

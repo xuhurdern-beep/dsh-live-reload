@@ -128,6 +128,9 @@ function ResultPanel({ result }) {
   if (result.added?.length > 0) lines.push(`新增 / added: ${result.added.join(', ')}`)
   if (result.removed?.length > 0) lines.push(`移除 / removed: ${result.removed.join(', ')}`)
   if (result.updated?.length > 0) lines.push(`更新 / updated: ${result.updated.join(', ')}`)
+  if (result.updatedOnDisk?.length > 0) {
+    lines.push(`磁盘已更新并热加载 / updated-on-disk, hot-loaded: ${result.updatedOnDisk.join(', ')}`)
+  }
   if (lines.length === 0) lines.push('无变化 / no changes')
 
   const needsReload = ok && result.clientGraphChanged === true

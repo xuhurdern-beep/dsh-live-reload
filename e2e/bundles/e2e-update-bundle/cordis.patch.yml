@@ -1,0 +1,4 @@
+# e2e fixture v1: one host row registering a probe tool and writing a marker.
+- insert:
+    - id: update-row
+      name: 'e2e-update-bundle'
