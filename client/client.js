@@ -29,14 +29,22 @@ window.__ModuleLoader__.load({
 		const NS = "dsh-live-reload";
 		/** One settings page inside Settings → "Plugin Refresh". */
 		const SECTION_ID = "live-reload";
-		/** Small inline style helpers (theme-independent, neutral palette). */
+		/**
+		* Theme-following inline style helpers over the real `--dsw-alias-*` tokens
+		* (verified against the client Theme service's token registry — see
+		* `@deepseek-ai/dsh-client-ui-theme`). The primary-button pair matches the
+		* harness's own `Button.module.css` (`--dsw-alias-button-primary-fill` +
+		* `--dsw-alias-label-primary-foreground`), which stays contrast-safe in both
+		* color schemes. Fallbacks keep the UI legible while the theme loads.
+		*/
 		const styles = {
 			card: {
 				display: "flex",
 				flexDirection: "column",
 				gap: "10px",
 				padding: "14px",
-				border: "1px solid var(--dsh-color-border, rgba(128,128,128,.3))",
+				border: "1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.3))",
+				background: "var(--dsw-alias-bg-layer-1, rgba(128,128,128,.06))",
 				borderRadius: "8px",
 				maxWidth: "560px",
 				fontSize: "13px",
@@ -51,8 +59,8 @@ window.__ModuleLoader__.load({
 			button: {
 				padding: "6px 14px",
 				borderRadius: "6px",
-				border: "1px solid var(--dsh-color-border, rgba(128,128,128,.4))",
-				background: "var(--dsh-color-surface-2, rgba(128,128,128,.12))",
+				border: "1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4))",
+				background: "var(--dsw-alias-bg-layer-2, rgba(128,128,128,.12))",
 				cursor: "pointer",
 				fontSize: "13px"
 			},
@@ -60,13 +68,13 @@ window.__ModuleLoader__.load({
 				padding: "6px 14px",
 				borderRadius: "6px",
 				border: "1px solid transparent",
-				background: "var(--dsh-color-accent, #4a6cf7)",
-				color: "#fff",
+				background: "var(--dsw-alias-button-primary-fill, #4a6cf7)",
+				color: "var(--dsw-alias-label-primary-foreground, #fff)",
 				cursor: "pointer",
 				fontSize: "13px"
 			},
 			muted: {
-				color: "var(--dsh-color-text-2, rgba(128,128,128,.85))",
+				color: "var(--dsw-alias-label-secondary, rgba(128,128,128,.85))",
 				fontSize: "12px"
 			},
 			list: {
@@ -75,7 +83,7 @@ window.__ModuleLoader__.load({
 				fontSize: "12px"
 			},
 			error: {
-				color: "#d9534f",
+				color: "var(--dsw-alias-state-error-primary, #d9534f)",
 				fontSize: "12px",
 				whiteSpace: "pre-wrap"
 			}
@@ -117,7 +125,7 @@ window.__ModuleLoader__.load({
 				style: styles.primary,
 				disabled: busy || status?.refreshing === true,
 				onClick: refresh
-			}, busy ? "刷新中…" : "一键刷新插件 / Refresh Plugins")), error !== null && (0, react.createElement)("pre", { style: styles.error }, error), result !== null && (0, react.createElement)(ResultPanel, { result }));
+			}, busy ? "刷新中…" : "一键刷新插件 / Refresh Plugins")), (0, react.createElement)("div", { style: styles.muted }, "提示:手动保存 cordis.patch.yml 后,内置 HMR 会按启动时的 bundle 集合重放;安装过新 bundle 时请再点一次刷新以完整恢复。"), error !== null && (0, react.createElement)("pre", { style: styles.error }, error), result !== null && (0, react.createElement)(ResultPanel, { result }));
 		}
 		/** Renders one refresh result: added / removed / updated rows + errors + reload hint. */
 		function ResultPanel({ result }) {
@@ -130,7 +138,7 @@ window.__ModuleLoader__.load({
 			if (lines.length === 0) lines.push("无变化 / no changes");
 			const needsReload = ok && result.clientGraphChanged === true;
 			return (0, react.createElement)("div", null, (0, react.createElement)("div", { style: {
-				color: ok ? "#3c9d5b" : "#d9534f",
+				color: ok ? "var(--dsw-alias-state-success-primary, #3c9d5b)" : "var(--dsw-alias-state-error-primary, #d9534f)",
 				fontSize: "12px",
 				fontWeight: 600
 			} }, ok ? "✓ 已热刷新，进程未退出 / refreshed live, process kept running" : "✗ 刷新失败 / refresh failed"), (0, react.createElement)("ul", { style: styles.list }, lines.map((line, index) => (0, react.createElement)("li", { key: index }, line))), needsReload && (0, react.createElement)("div", { style: styles.row }, (0, react.createElement)("span", { style: styles.muted }, "有新的客户端插件出现，刷新页面以加载（宿主进程不退出）:"), (0, react.createElement)("button", {
