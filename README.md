@@ -95,6 +95,15 @@ exactly, including the two boot-only overlays most reimplementations forget:
   modules (rc-era releases included).
 - Windows / macOS / Linux — pure Node ESM host, zero native deps.
 
+## Known interactions
+
+The built-in HMR watcher recomposes on every `cordis.patch.yml` save from the
+bundle set **captured at boot**. If you install a new bundle and hot-apply it
+with this plugin, a subsequent manual edit of `cordis.patch.yml` makes the
+built-in watcher re-apply the *boot-time* bundle set (the new bundle's rows
+drop out) — just click the refresh button again afterwards: it re-reads
+everything fresh and re-applies the full composition.
+
 ## What still needs a restart
 
 - **Updating an already-installed package to a new version** (the loader's module cache

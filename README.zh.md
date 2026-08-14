@@ -86,6 +86,13 @@ curl -s -X POST -H 'origin: http://127.0.0.1:3080' http://127.0.0.1:3080/dsh-liv
 - 不锁定 `dsh.bundle` 版本:兼容提供回退模块的任何 Harness 版本(含 rc 版)。
 - Windows / macOS / Linux —— 纯 Node ESM 宿主,零原生依赖。
 
+## 已知交互
+
+内置 HMR watcher 每次保存 `cordis.patch.yml` 时,用的是**启动时捕获**的 bundle 集合来重组。
+如果你用本插件热应用了新装的 bundle,之后又手动编辑 `cordis.patch.yml`,内置 watcher 会按
+启动时的 bundle 集合重新应用(新 bundle 的行会被移除)——此时再点一次刷新按钮即可:它会
+重新读取全部内容并应用完整组合。
+
 ## 仍需要重启的场景
 
 - **把已安装的同名包升级到新版本**(loader 模块缓存对同名包仍提供旧代码;web 面关闭了
