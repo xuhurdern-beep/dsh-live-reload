@@ -91,8 +91,9 @@ exactly, including the two boot-only overlays most reimplementations forget:
 - Requires `@deepseek-ai/dsh-app-boot` at runtime — it resolves through the profile's
   node_modules / `$DSH_HOME/profiles/node_modules` installation fallback (never declared as
   a dependency, same as the ecosystem market plugin).
-- No `dsh.bundle`-level version pinning: works with the harness that provides the fallback
-  modules (rc-era releases included).
+- No `dsh.bundle`-level version pinning. **Verified on `0.1.0-rc.5`** (the harness
+  that ships the fallback modules); other rc-era releases should behave the same
+  way, but only rc.5 has actually been exercised.
 - Windows / macOS / Linux — pure Node ESM host, zero native deps.
 
 ## Verification
@@ -115,6 +116,11 @@ The composition logic is additionally cross-checked against the launcher's own
 `node scripts/validate-composition.mjs <profile>` (row-identical, including the
 agent-presets shipped-roots overlay and the telemetry switch).
 
+The whole suite is scripted: `npm test` boots an isolated instance and runs
+status / idempotent refresh / hot-mount / hot-unmount / client dispatch /
+`clientGraphChanged` end-to-end, plus the boot-vs-fresh `agent-presets` audit
+(see `scripts/e2e.mjs`).
+
 ## Known interactions
 
 The built-in HMR watcher recomposes on every `cordis.patch.yml` save from the
@@ -135,14 +141,16 @@ everything fresh and re-applies the full composition.
 ## Development
 
 ```bash
-npm install        # devDependency: tsdown (builds the client bundle)
-npm run build:client
-npm run check      # node --check on both halves
+npm run build:client   # requires tsdown locally: pnpm add -D tsdown@^0.22.14 (or: npm i -D tsdown@^0.22.14)
+npm run check          # node --check on both halves + shipped-artifact guards
+npm test               # scripted e2e on an isolated instance (see scripts/e2e.mjs)
 node scripts/validate-composition.mjs web   # compare recomposition vs launcher dump
 ```
 
 The client bundle (`client/client.js`) is the shipped artifact — rebuild and commit it when
-you change `src/client/index.js`.
+you change `src/client/index.js`. `tsdown` is intentionally **not** a declared
+devDependency: `client/client.js` is committed, and a git/npm install of this package must
+not drag in a build toolchain.
 
 ## Security
 

@@ -83,7 +83,8 @@ curl -s -X POST -H 'origin: http://127.0.0.1:3080' http://127.0.0.1:3080/dsh-liv
   的树会被识别并报错。
 - 运行时需要 `@deepseek-ai/dsh-app-boot`——通过 profile 的 node_modules /
   `$DSH_HOME/profiles/node_modules` 安装回退解析(不声明为依赖,与生态市场插件同款做法)。
-- 不锁定 `dsh.bundle` 版本:兼容提供回退模块的任何 Harness 版本(含 rc 版)。
+- 不锁定 `dsh.bundle` 版本。**实测于 `0.1.0-rc.5`**(提供回退模块的 Harness);其他 rc 版本
+  预期行为一致,但未逐一实测。
 - Windows / macOS / Linux —— 纯 Node ESM 宿主,零原生依赖。
 
 ## 验证
@@ -103,6 +104,10 @@ curl -s -X POST -H 'origin: http://127.0.0.1:3080' http://127.0.0.1:3080/dsh-liv
 (`node scripts/validate-composition.mjs <profile>`),含 agent-presets 系统预设根覆盖层与
 telemetry 开关。
 
+整套验证已脚本化:`npm test` 会启动一个隔离实例,端到端跑状态/幂等/热挂载/热卸载/客户端
+下发/`clientGraphChanged`,外加 boot 与 fresh 重组之间的 `agent-presets` 审计
+(见 `scripts/e2e.mjs`)。
+
 ## 已知交互
 
 内置 HMR watcher 每次保存 `cordis.patch.yml` 时,用的是**启动时捕获**的 bundle 集合来重组。
@@ -120,13 +125,15 @@ telemetry 开关。
 ## 开发
 
 ```bash
-npm install        # 开发依赖:tsdown(构建客户端 bundle)
-npm run build:client
-npm run check      # 对两个半区做 node --check
+npm run build:client   # 本地需装 tsdown:pnpm add -D tsdown@^0.22.14(或 npm i -D tsdown@^0.22.14)
+npm run check          # 两个半区 node --check + 发布产物守卫
+npm test               # 隔离实例上的脚本化 e2e(见 scripts/e2e.mjs)
 node scripts/validate-composition.mjs web   # 对比重组合结果与 launcher dump
 ```
 
 `client/client.js` 是随包发布的构建产物——改完 `src/client/index.js` 后请重建并提交。
+`tsdown` 故意不声明为 devDependency:`client/client.js` 已提交,安装本包(git 或 npm)
+不应拖入构建工具链。
 
 ## 安全
 

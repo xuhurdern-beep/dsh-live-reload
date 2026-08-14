@@ -5,6 +5,18 @@
   "type": "module",
   "main": "./src/index.js",
   "license": "MIT",
+  "author": "hurdern <xuhurdern@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hurdern/dsh-live-reload.git"
+  },
+  "homepage": "https://github.com/hurdern/dsh-live-reload#readme",
+  "bugs": {
+    "url": "https://github.com/hurdern/dsh-live-reload/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
   "files": [
     "src",
     "client",
@@ -45,9 +57,7 @@
   },
   "scripts": {
     "build:client": "tsdown",
-    "check": "node --check src/index.js && node --check src/client/index.js"
-  },
-  "devDependencies": {
-    "tsdown": "^0.22.14"
+    "check": "node --check src/index.js && node --check src/client/index.js && node scripts/check-artifacts.mjs",
+    "test": "node scripts/e2e.mjs"
   }
 }
