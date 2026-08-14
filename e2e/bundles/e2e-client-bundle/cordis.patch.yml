@@ -1,0 +1,5 @@
+# e2e fixture: a no-op host row carrying a client half — exercises the
+# clientGraphChanged=true path of the refresh result (new client bundle appears).
+- insert:
+    - id: e2e-client-row
+      name: 'e2e-client-bundle'

@@ -1,0 +1,7 @@
+# e2e fixture: one no-op host row — the hot-mount / hot-unmount target of the
+# refresh test (appended to dsh.profile.bundles then removed). The row name is
+# the bundle's own package name, resolved through the profile's node_modules —
+# the same pattern the real plugin's cordis.patch.yml uses.
+- insert:
+    - id: e2e-probe-row
+      name: 'e2e-bundle'

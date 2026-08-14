@@ -1,0 +1,21 @@
+{
+  "name": "e2e-client-bundle",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./e2e-client.js",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  },
+  "exports": {
+    ".": "./e2e-client.js",
+    "./client": "./client/client.js",
+    "./package.json": "./package.json"
+  }
+}
