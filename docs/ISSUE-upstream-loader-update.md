@@ -1,7 +1,9 @@
 # Issue draft — upstream deepseek-harness
 
 > Prepared from a real reproduction via the `dsh-live-reload` plugin (third-party,
-> https://github.com/xuhurdern-beep/dsh-live-reload). Filed for upstream discussion.
+> https://github.com/xuhurdern-beep/dsh-live-reload).
+> **Filed as GitHub Discussion #1610: https://github.com/deepseek-ai/deepseek-harness/discussions/1610**
+> (the upstream repo has Issues disabled; Discussions is the documented feedback channel).
 
 ---
 
