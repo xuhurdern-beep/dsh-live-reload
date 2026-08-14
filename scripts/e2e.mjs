@@ -9,7 +9,8 @@
  * Covers: status / idempotent refresh / hot-mount / hot-unmount / client
  * dispatch / boot manifest / clientGraphChanged=true path / the P0-2 audit
  * (does the first refresh still touch `agent-presets`? does the boot-time
- * loader row match a fresh recomposition?).
+ * loader row match a fresh recomposition?) / a conflicting bundle that cannot
+ * activate → loud failure, transactional rollback, and clean recovery.
  *
  * Usage: node scripts/e2e.mjs
  * Exit code: 0 = every check passed; non-zero otherwise.
@@ -82,7 +83,7 @@ function setBundles(bundles) {
 /** Remove junctions first (unlink removes the reparse point, not the target), then the profile dir. */
 function cleanup(child) {
   try { child?.kill() } catch { /* already gone */ }
-  const junctions = ['dsh-live-reload', 'e2e-bundle', 'e2e-client-bundle']
+  const junctions = ['dsh-live-reload', 'e2e-bundle', 'e2e-client-bundle', 'e2e-conflict-bundle']
   for (const name of junctions) {
     try { unlinkSync(join(profileDir, 'node_modules', name)) } catch { /* absent */ }
   }
@@ -107,6 +108,7 @@ async function main() {
       'dsh-live-reload': `link:${REPO.replaceAll('\\', '/')}`,
       'e2e-bundle': `link:${join(REPO, 'e2e', 'bundles', 'e2e-bundle').replaceAll('\\', '/')}`,
       'e2e-client-bundle': `link:${join(REPO, 'e2e', 'bundles', 'e2e-client-bundle').replaceAll('\\', '/')}`,
+      'e2e-conflict-bundle': `link:${join(REPO, 'e2e', 'bundles', 'e2e-conflict-bundle').replaceAll('\\', '/')}`,
     },
     dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-live-reload'] } },
   }, null, 2) + '\n', 'utf8')
@@ -151,7 +153,7 @@ async function main() {
   ].join('\n'), 'utf8')
 
   // profile node_modules: the same link:/junction layout `dsh plugin add link:` produces.
-  for (const name of ['dsh-live-reload', 'e2e-bundle', 'e2e-client-bundle']) {
+  for (const name of ['dsh-live-reload', 'e2e-bundle', 'e2e-client-bundle', 'e2e-conflict-bundle']) {
     const target = name === 'dsh-live-reload'
       ? REPO
       : join(REPO, 'e2e', 'bundles', name)
@@ -257,6 +259,26 @@ async function main() {
     const clientUnmounted = await refresh(url)
     check(clientUnmounted.status === 200 && clientUnmounted.body.ok === true && (clientUnmounted.body.removed ?? []).includes('e2e-client-row'),
       'remove client bundle → row hot-disposes', JSON.stringify(clientUnmounted.body))
+
+    // --- 5b. conflicting bundle → loud failure + transactional rollback ---------
+    // Mirrors the reported modlens case: a row whose activation throws (here:
+    // registering a tool name the harness already owns) must fail the whole
+    // refresh, leave the running tree untouched, and recover cleanly once the
+    // offending bundle is removed.
+    setBundles(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-live-reload', 'e2e-conflict-bundle'])
+    const conflicted = await refresh(url)
+    check(conflicted.status === 502 && conflicted.body.ok === false && (conflicted.body.errors ?? []).length > 0,
+      'conflicting bundle → refresh fails loudly (502, errors listed)', JSON.stringify(conflicted.body))
+    check((conflicted.body.errors ?? []).some(error => String(error).includes('e2e-conflict')),
+      'error names the conflicting row')
+    const afterConflict = await status(url)
+    check(afterConflict.status === 200 && afterConflict.body.refreshing === false,
+      'instance healthy after rollback (status 200, not stuck refreshing)')
+    setBundles(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-live-reload'])
+    const recovered = await refresh(url)
+    check(recovered.status === 200 && recovered.body.ok === true && recovered.body.added?.length === 0
+      && recovered.body.removed?.length === 0,
+      'removing the conflicting bundle → refresh recovers (zero changes)', JSON.stringify(recovered.body))
 
     // --- 6. own client dispatch + boot manifest -----------------------------
     try {

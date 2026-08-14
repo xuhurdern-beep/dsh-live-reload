@@ -1,0 +1,6 @@
+# e2e fixture: a row that cannot activate — mirrors a third-party plugin
+# colliding with an already-registered tool name. The refresh must fail
+# loudly and roll back transactionally, leaving the running tree untouched.
+- insert:
+    - id: e2e-conflict-row
+      name: 'e2e-conflict-bundle'
