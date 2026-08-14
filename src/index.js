@@ -402,10 +402,15 @@ function registerRoutes(ctx, state) {
           response.end()
           return
         }
-        const profileDir = profileDirOf(ctx)
+        let profile = '?'
+        try {
+          profile = basename(profileDirOf(ctx))
+        } catch {
+          // hand-built tree without a profile directory — still answer
+        }
         sendJson(response, 200, {
           plugin: 'dsh-live-reload',
-          profile: basename(profileDir),
+          profile,
           refreshing: state.refreshing,
           last: state.last,
         })
@@ -465,9 +470,46 @@ function registerRoutes(ctx, state) {
 
 /**
  * Cordis plugin entry.
+ *
+ * Route registration is late-bound: `webServer` is a root row that may still
+ * be mounting when this row activates, and on headless/custom profiles it may
+ * never exist at all (the plugin then stays inert instead of failing the boot
+ * as a pending inject). We retry once the loader tree settles and whenever a
+ * new loader entry comes up — the realistic window covers boot ordering.
  * @param {import('@deepseek-ai/cordis').Context} ctx
  */
 export function apply(ctx) {
   const state = { refreshing: false, last: null }
-  ctx.effect(() => registerRoutes(ctx, state), 'dsh-live-reload: http routes')
+  const disposers = []
+
+  const tryRegister = () => {
+    if (disposers.length > 0) return true
+    const dispose = registerRoutes(ctx, state)
+    if (dispose === undefined) return false
+    disposers.push(dispose)
+    return true
+  }
+
+  // (1) Retry whenever a loader entry's fiber comes up (webServer included).
+  let unsubPlugin = () => {}
+  const onPlugin = () => {
+    if (tryRegister()) unsubPlugin()
+  }
+  unsubPlugin = ctx.on('internal/plugin', onPlugin)
+
+  // (2) Also re-check once the whole tree has settled (covers non-entry
+  //     providers and guarantees webServer is up if it ever will be).
+  void Promise.resolve().then(async () => {
+    try {
+      await ctx.get('loader')?.await()
+    } catch {
+      // the tree settled into failure; the internal/plugin path keeps trying
+    }
+    if (tryRegister()) unsubPlugin()
+  })
+
+  ctx.effect(() => () => {
+    unsubPlugin()
+    for (const dispose of disposers) dispose()
+  }, 'dsh-live-reload: routes lifecycle')
 }
