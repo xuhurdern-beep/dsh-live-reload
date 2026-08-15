@@ -58,6 +58,6 @@
   "scripts": {
     "build:client": "tsdown",
     "check": "node --check src/index.js && node --check src/client/index.js && node scripts/check-artifacts.mjs",
-    "test": "node scripts/e2e.mjs"
+    "test": "node --test test/ && node scripts/e2e.mjs"
   }
 }

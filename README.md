@@ -12,8 +12,8 @@ transactionally, rolling back on failure. Only the rows that actually changed ar
 
 > Today, installing a new plugin (e.g. via the plugin market) often ends with
 > "restart DeepSeek Harness to apply". This plugin is the general fix for that: a button in
-> Settings that hot-applies the whole composition, plus a page reload only when new *client*
-> bundles appeared (the host process itself never exits).
+> Settings that hot-applies the whole composition, then reloads the page so new *client*
+> bundles land in the running browser — the host process itself never exits.
 
 ## Features
 
@@ -26,18 +26,24 @@ transactionally, rolling back on failure. Only the rows that actually changed ar
   uses on every `cordis.patch.yml` save; unchanged rows are never restarted, failures roll
   back, a refresh is serialized and bounded by a timeout.
 - **Result report** — the button shows added / removed / updated rows and any activation
-  errors, and offers a page reload only when new client bundles appeared.
+  errors; a successful refresh then **always reloads the page** (no diff-based "did new
+  client bundles appear" detection — the reload re-fetches the live boot manifest, which
+  already carries any new package's client bundle, so a market hot-install lands every time).
 - **No process exit** — the host keeps running; sessions replay their history from the
-  persisted log after a page reload (the web app's standard reload recovery).
+  persisted log after the page reload (the web app's standard reload recovery).
 - **Hot package updates (0.2.0)** — every bundle is fingerprinted on disk (seeded at
   boot); when a mounted package's files change in place (market reinstall/update), the
   refresh re-points its loader rows at a cache-busted entry URL, so the loader re-imports
   and runs the NEW code — no restart, and no "tool already registered" collision (the
   loader withdraws the old fiber's registrations before starting the new one).
 - **Collision self-heal (0.2.0)** — if a refresh still hits
-  `tool "X" is already registered` (a re-applied row whose files did not change), the
-  plugin identifies the offending package, force-busts its module cache and retries once
-  — the collision heals itself without a restart (`selfHealed` in the result).
+  `tool "X" is already registered`, the plugin identifies the offending package,
+  force-busts its module cache and retries once — the collision heals itself
+  without a restart (`selfHealed` in the result). This also covers the market's
+  **hot-mount residue**: when a plugin was hot-installed (`mkt-*` rows in the
+  market's runtime-only subtree) and the bundle layer later owns the same
+  package, the refresh disposes the conflicting live `mkt-*` row (withdrawing
+  its registrations) before re-applying the bundle-layer row.
 
 ## Install
 
@@ -56,10 +62,11 @@ applied with the refresh button, no more restarts.
 ## Usage
 
 1. Open the Web GUI → Settings → **Plugin Refresh / 插件刷新**.
-2. Click **一键刷新插件 / Refresh Plugins**.
-3. Read the result: `✓ 已热刷新` with added/removed/updated rows, or an error list.
-4. If the result says new client plugins appeared, click **刷新页面 / Reload Page**
-   (the host process stays up; only the browser reloads).
+2. Click **一键刷新插件并重载页面 / Refresh Plugins & Reload**.
+3. On success the page **reloads automatically** after a short pause — new client
+   bundles (e.g. a just-installed plugin's UI) land in the browser; the host
+   process and all sessions stay up. On failure the error panel stays readable
+   and no reload happens.
 
 Power users can call the same endpoints directly:
 
@@ -83,7 +90,10 @@ Settings button ──POST──▶ /dsh-live-reload/refresh
         loader reconciles: mount new rows · config-update changed rows · dispose removed rows
                             │
                             ▼
-        audit (every enabled row has a live fiber) + diff report + client-graph change flag
+        audit (every enabled row has a live fiber) + diff report
+                            │
+                            ▼
+        success → the client reloads the page (host process stays up)
 ```
 
 The composition code (`composeFresh`) mirrors the launcher's `composeProfile`/`composeLive`

@@ -12,8 +12,14 @@ window.__ModuleLoader__.load({
 		* Renders a "Plugin Refresh / 插件刷新" settings section: shows the booted
 		* profile and the last refresh result, and triggers a restart-free
 		* composition refresh through the host's `/dsh-live-reload/refresh` route.
-		* When the refresh changed the client plugin graph (new client bundles), the
-		* section offers a page reload — the host process itself never exits.
+		* A successful refresh ALWAYS reloads the page afterwards (a short pause
+		* keeps the success result visible) — the host process itself never exits.
+		* The unconditional reload is what makes a market hot-install land in the
+		* running browser: the page re-fetches the live boot manifest, which already
+		* carries the new package's client bundle, so no diff-based
+		* "clientGraphChanged" detection is needed (that signal is invisible for
+		* market hot-mounts anyway, because the client graph is deduplicated by
+		* package name and the hot-mount row already registered the package).
 		*
 		* The bundle is built by tsdown (see tsdown.config.js) into the
 		* `window.__ModuleLoader__.load({ id, factory })` artifact; `react` and
@@ -112,6 +118,13 @@ window.__ModuleLoader__.load({
 					})).json();
 					setResult(data);
 					loadStatus();
+					if (data.ok === true) {
+						await new Promise((resolve) => {
+							setTimeout(resolve, 600).unref?.();
+						});
+						location.reload();
+						return;
+					}
 				} catch (caught) {
 					setError(String(caught));
 				} finally {
@@ -125,9 +138,14 @@ window.__ModuleLoader__.load({
 				style: styles.primary,
 				disabled: busy || status?.refreshing === true,
 				onClick: refresh
-			}, busy ? "刷新中…" : "一键刷新插件 / Refresh Plugins")), (0, react.createElement)("div", { style: styles.muted }, "提示:手动保存 cordis.patch.yml 后,内置 HMR 会按启动时的 bundle 集合重放;安装过新 bundle 时请再点一次刷新以完整恢复。"), error !== null && (0, react.createElement)("pre", { style: styles.error }, error), result !== null && (0, react.createElement)(ResultPanel, { result }));
+			}, busy ? "刷新并重载中…" : "一键刷新插件并重载页面 / Refresh Plugins & Reload")), (0, react.createElement)("div", { style: styles.muted }, "提示:手动保存 cordis.patch.yml 后,内置 HMR 会按启动时的 bundle 集合重放;安装过新 bundle 时请再点一次刷新以完整恢复。刷新成功后页面将自动重载以加载新的客户端插件（宿主进程不退出）。"), error !== null && (0, react.createElement)("pre", { style: styles.error }, error), result !== null && (0, react.createElement)(ResultPanel, { result }));
 		}
-		/** Renders one refresh result: added / removed / updated rows + errors + reload hint. */
+		/**
+		* Renders one refresh result: added / removed / updated rows + errors.
+		* Success reloads the page automatically (see `refresh`), so this panel is
+		* only fully readable for failures — success shows for a moment before the
+		* reload lands.
+		*/
 		function ResultPanel({ result }) {
 			const ok = result.ok === true;
 			const lines = [];
@@ -137,15 +155,11 @@ window.__ModuleLoader__.load({
 			if (result.updated?.length > 0) lines.push(`更新 / updated: ${result.updated.join(", ")}`);
 			if (result.updatedOnDisk?.length > 0) lines.push(`磁盘已更新并热加载 / updated-on-disk, hot-loaded: ${result.updatedOnDisk.join(", ")}`);
 			if (lines.length === 0) lines.push("无变化 / no changes");
-			const needsReload = ok && result.clientGraphChanged === true;
 			return (0, react.createElement)("div", null, (0, react.createElement)("div", { style: {
 				color: ok ? "var(--dsw-alias-state-success-primary, #3c9d5b)" : "var(--dsw-alias-state-error-primary, #d9534f)",
 				fontSize: "12px",
 				fontWeight: 600
-			} }, ok ? "✓ 已热刷新，进程未退出 / refreshed live, process kept running" : "✗ 刷新失败 / refresh failed"), (0, react.createElement)("ul", { style: styles.list }, lines.map((line, index) => (0, react.createElement)("li", { key: index }, line))), needsReload && (0, react.createElement)("div", { style: styles.row }, (0, react.createElement)("span", { style: styles.muted }, "有新的客户端插件出现，刷新页面以加载（宿主进程不退出）:"), (0, react.createElement)("button", {
-				style: styles.button,
-				onClick: () => location.reload()
-			}, "刷新页面 / Reload Page")));
+			} }, ok ? "✓ 已热刷新，即将重载页面 / refreshed live, reloading…" : "✗ 刷新失败 / refresh failed"), (0, react.createElement)("ul", { style: styles.list }, lines.map((line, index) => (0, react.createElement)("li", { key: index }, line))));
 		}
 		/**
 		* Cordis client plugin entry: register the settings section.

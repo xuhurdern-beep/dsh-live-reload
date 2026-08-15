@@ -8,6 +8,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Market hot-mount collision on refresh**: when a plugin was hot-installed
+  by the market (`mkt-*` rows in the market's runtime-only subtree) and the
+  bundle layer later owns the same package, a refresh re-applying the
+  bundle-layer row failed with `tool "..." is already registered` — the
+  hot-mount fiber kept its global tool registrations, and the self-heal's
+  force-bust could not retire it. The refresh now disposes the live `mkt-*`
+  rows for the colliding package (withdrawing the registrations) and retries
+  once, so `一键刷新插件` heals the hot-install residue instead of erroring.
+- **`collisionPackage` with cache-busted row names**: the collision
+  self-heal now extracts the package name from a `node_modules/<pkg>/`
+  segment when the failing row's name is a cache-busted entry URL
+  (`file:///.../index.mjs?dshr=<rev>`), instead of passing the whole URL to
+  `require.resolve` and rethrowing.
 - **Real theme tokens**: the client settings card now consumes the harness's
   actual `--dsw-alias-*` design tokens (verified against the client Theme
   service registry in `@deepseek-ai/dsh-client-ui-theme`) instead of the
@@ -24,6 +37,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Direct refresh: success always reloads the page** — `一键刷新插件` no longer
+  diffs for client-graph changes (`clientGraphChanged`) to decide whether a
+  page reload is needed. A successful refresh now always reloads the page
+  after a brief pause (host process and all sessions stay up). This makes a
+  market hot-install land in the running browser every time: the reload
+  re-fetches the live boot manifest, which already carries the new package's
+  client bundle. (The old signal was blind for market hot-mounts anyway —
+  the client graph is deduplicated by package name, and the hot-mount row
+  already registered the package before the refresh ran.) Failures never
+  reload — the error panel stays readable.
 - `devDependencies` (`tsdown`) removed from `package.json`: `client/client.js`
   is a committed build artifact, and installing this package (git or npm) must
   not drag in a build toolchain. Local rebuilds need

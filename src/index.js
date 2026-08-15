@@ -452,14 +452,21 @@ function syncPackageFingerprints(profileDir, packageHashes, seed) {
  * Extract the offending package from a "tool ... is already registered" apply
  * failure, e.g. `... failed to apply loader entry import-claude (dsh-chat-import):
  * tool "import_claude" is already registered (...)` → `dsh-chat-import`.
+ *
+ * The captured row name may also be a cache-busted entry URL (in-place package
+ * updates re-point rows at `file:///.../node_modules/<pkg>/index.mjs?dshr=<rev>`),
+ * so a `node_modules/<pkg>/` segment is extracted from the URL when present.
  * @param {unknown} error
  * @returns {string | undefined} the package name, or undefined when the error
  * is not a tool-registration collision.
  */
-function collisionPackage(error) {
+export function collisionPackage(error) {
   const message = error instanceof Error ? error.message : String(error)
   const match = message.match(/failed to apply loader entry \S+ \(([^)]+)\):\s*tool "[^"]+" is already registered/)
-  return match?.[1]
+  const raw = match?.[1]
+  if (raw === undefined) return undefined
+  const pkg = /node_modules\/((?:@[^/]+\/)?[^/]+)\//.exec(raw)
+  return pkg?.[1] ?? raw
 }
 
 /**
@@ -480,6 +487,40 @@ function forceBustUrl(requireProfile, packageName, state) {
   state.bustCounter += 1
   const rev = createHash('sha256').update(`${packageName}:${state.bustCounter}:${Date.now()}`).digest('hex').slice(0, 12)
   return `${pathToFileURL(entryFile).href}?dshr=${rev}`
+}
+
+/**
+ * Dispose the market's live hot-mount rows for a package. The market's
+ * restart-free install mounts the plugin under `mkt-` ids inside its own
+ * Include subtree (`.dsh-market/hot-*.yml` — runtime-only input, wiped on
+ * every boot). When the bundle layer later owns the same package (the
+ * on-disk composition), that subtree keeps its fiber — and its global tool
+ * registrations — alive, so a refresh's re-apply of the bundle-layer row
+ * fails with "tool ... is already registered", and cache-busting cannot
+ * help: the conflicting fiber is not the row being replaced. Disposing the
+ * `mkt-*` row withdraws the registration and lets the bundle-layer row apply.
+ * @param {import('@deepseek-ai/cordis').Context} ctx
+ * @param {string} packageName - package to reconcile away from the hot subtree.
+ * @returns {Promise<string[]>} the removed row ids (empty when none matched).
+ */
+export async function disposeMarketHotMounts(ctx, packageName) {
+  const loader = ctx.get('loader')
+  if (loader === undefined) return []
+  const urlLike = `/node_modules/${packageName}/`
+  const matches = []
+  for (const entry of loader.entries()) {
+    const id = entry.options?.id
+    const name = entry.options?.name
+    if (typeof id !== 'string' || !id.startsWith('mkt-')) continue
+    if (typeof name !== 'string' || (name !== packageName && !name.includes(urlLike))) continue
+    matches.push(entry)
+  }
+  const removed = []
+  for (const entry of matches) {
+    await entry.parent.remove(entry.options.id)
+    removed.push(entry.options.id)
+  }
+  return removed
 }
 
 /**
@@ -527,12 +568,17 @@ async function performRefresh(ctx, state) {
     await applyComposition()
   } catch (error) {
     // Collision self-heal: a re-applied row that registers a tool name still
-    // held by its previous fiber fails with "already registered". Force-bust
-    // the offending package (a fresh cache key even when its files did not
-    // change), rewrite its rows in the patch stack, and retry ONCE — the
-    // replace path then disposes the old fiber (withdrawing the registration)
-    // before the fresh apply runs. Genuine conflicts with other packages are
-    // NOT masked: the retry re-fails and the original error is rethrown.
+    // held by another live fiber fails with "already registered". Two causes
+    // are healed in order:
+    //   1. A stale SELF fiber (the replace path did not withdraw the old
+    //      registration): force-bust the offending package (a fresh cache key
+    //      even when its files did not change), rewrite its rows, retry ONCE.
+    //   2. A market HOT-MOUNT row (`mkt-*`, the market's restart-free install
+    //      subtree): busting cannot retire that fiber — dispose the live
+    //      `mkt-*` rows for the package (withdrawing the registration) and
+    //      retry ONCE.
+    // Genuine conflicts with other packages are NOT masked: both retries
+    // re-fail and the original error is rethrown.
     const pkg = collisionPackage(error)
     if (pkg !== undefined && pkg !== BIN) {
       const url = forceBustUrl(requireProfile, pkg, state)
@@ -549,11 +595,23 @@ async function performRefresh(ctx, state) {
           selfHealed = [pkg]
           busted.push(url)
         } catch {
-          // The retry failed too — a genuine conflict; surface the original error.
+          // Fall through to the market hot-mount reconciliation below.
+        }
+      }
+      if (selfHealed.length === 0) {
+        const removed = await disposeMarketHotMounts(ctx, pkg)
+        if (removed.length > 0) {
+          try {
+            await applyComposition()
+            selfHealed = [pkg]
+            if (url !== undefined) busted.push(url)
+          } catch {
+            // The retry failed too — a genuine conflict; surface the original error.
+            throw error
+          }
+        } else {
           throw error
         }
-      } else {
-        throw error
       }
     } else {
       throw error
