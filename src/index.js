@@ -421,6 +421,98 @@ function bustChangedPackageRows(patches, requireProfile, changed, packageHashes,
 }
 
 /**
+ * All file URLs under one package directory (`node_modules`/`.git` skipped) —
+ * exactly the keys an in-place package update can leave stale in the Node
+ * internal ESM `loadCache`.
+ * @param {string} packageDir - absolute package directory.
+ * @returns {string[]} `file://` hrefs, sorted.
+ */
+export function packageFileUrls(packageDir) {
+  const urls = []
+  const seen = new Set()
+  const walk = (dir) => {
+    let entries
+    try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const entry of entries) {
+      if (entry.name === 'node_modules' || entry.name === '.git') continue
+      const full = join(dir, entry.name)
+      if (seen.has(full)) continue
+      seen.add(full)
+      if (entry.isDirectory()) { walk(full); continue }
+      urls.push(pathToFileURL(full).href)
+    }
+  }
+  walk(packageDir)
+  urls.sort()
+  return urls
+}
+
+/**
+ * Evict every busted package's module from the Node internal ESM `loadCache`:
+ * all file URLs under the package directory AND its cache-busted entry URL.
+ *
+ * Why: the `?dshr=` bust only re-keys a row's ENTRY file — the entry's
+ * RELATIVE imports resolve without the query (Node drops it when resolving
+ * `./dep.js` against `index.js?dshr=x`), so an in-place upgrade that changed
+ * non-entry files (e.g. dshmarket's `lib/dsh-cli.js` gaining an export the new
+ * `index.js` imports) would keep serving the pre-update modules and fail with
+ * `The requested module './dsh-cli.js' does not provide an export named ...`.
+ * Deleting the cached jobs forces the next import to re-read the fresh files.
+ * (Node 24's `loadCache` treats delete as "set the slot to undefined" — the
+ * job is recreated on the next import.) Best-effort: without the Node
+ * internals the entry-only bust (previous behavior) still applies.
+ * @param {import('@deepseek-ai/cordis').Context} ctx
+ * @param {NodeJS.Require} requireProfile - profile-anchored resolver.
+ * @param {Map<string, string>} bustedNames - name → busted entry URL.
+ * @returns {string[]} package names whose caches were evicted.
+ */
+export function evictBustedPackages(ctx, requireProfile, bustedNames) {
+  const loader = ctx.get('loader')
+  const cache = loader?.internal?.loadCache
+  if (cache === undefined || typeof cache.delete !== 'function') return []
+  const evicted = []
+  for (const [name, bustedUrl] of bustedNames) {
+    if (name === BIN) continue
+    let dir
+    try { dir = dirname(requireProfile.resolve(`${name}/package.json`)) } catch { continue }
+    let hit = 0
+    for (const url of packageFileUrls(dir)) {
+      try { cache.delete(url); hit += 1 } catch { /* best-effort */ }
+    }
+    try { cache.delete(bustedUrl); hit += 1 } catch { /* best-effort */ }
+    if (hit > 0) evicted.push(name)
+  }
+  return evicted
+}
+
+/**
+ * Flatten an error into its message chain (cause + `AggregateError.errors`),
+ * so a wrapped failure ("failed to rollback loader entry ...: ") never hides
+ * the underlying reason behind an empty `AggregateError` message. Depth-capped
+ * and cycle-guarded.
+ * @param {unknown} error
+ * @returns {string[]} non-empty messages, outermost first.
+ */
+export function collectErrorChain(error) {
+  const out = []
+  const seen = new Set()
+  const walk = (e, depth) => {
+    if (depth > 5 || e === null || e === undefined || seen.has(e)) return
+    seen.add(e)
+    if (typeof e === 'string') { if (e) out.push(e); return }
+    const msg = e instanceof Error ? e.message : String(e)
+    if (msg) out.push(msg)
+    if (Array.isArray(e.errors)) {
+      for (const cause of e.errors) walk(cause, depth + 1)
+    } else if (e.cause !== undefined) {
+      walk(e.cause, depth + 1)
+    }
+  }
+  walk(error, 0)
+  return out
+}
+
+/**
  * Record every bundle package's on-disk fingerprint and report the packages
  * that changed since the last snapshot. Seeded at boot-settle so a package
  * replaced AFTER boot (market reinstall) is detected on the very first
@@ -549,6 +641,14 @@ async function performRefresh(ctx, state) {
   const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
   const currentBundles = manifest.dsh?.profile?.bundles ?? []
   const busted = bustChangedPackageRows(patches, requireProfile, changed, state.packageHashes, state.bustedNames, currentBundles)
+
+  // Module-cache eviction for every busted package: the `?dshr=` bust above
+  // only re-keys a row's ENTRY file — its RELATIVE imports resolve without the
+  // query, so an upgrade that changed non-entry files would keep serving the
+  // pre-update modules (stale exports → "does not provide an export named ...").
+  // Evict the package's cached jobs (plain file URLs AND the busted entry URL)
+  // so the reconcile below re-reads the fresh files from disk.
+  evictBustedPackages(ctx, requireProfile, state.bustedNames)
 
   const before = snapshotEntries(ctx)
   const clientModules = ctx.get('clientModules')
@@ -739,14 +839,18 @@ function registerRoutes(ctx, state) {
           sendJson(response, result.ok ? 200 : 502, result)
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
-          state.last = { at: Date.now(), ok: false, errors: [message], added: [], removed: [], updated: [] }
+          // Flatten the whole cause chain (incl. AggregateError.errors) so a
+          // wrapped failure like "failed to rollback loader entry ...: "
+          // (empty AggregateError message) never hides the underlying reason.
+          const chain = collectErrorChain(error)
+          state.last = { at: Date.now(), ok: false, errors: chain, added: [], removed: [], updated: [] }
           sendJson(response, 502, {
             ok: false,
             error: message,
             added: [],
             removed: [],
             updated: [],
-            errors: [message],
+            errors: chain,
             clientGraphChanged: false,
           })
         } finally {

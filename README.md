@@ -29,13 +29,18 @@ transactionally, rolling back on failure. Only the rows that actually changed ar
   errors; a successful refresh then **always reloads the page** (no diff-based "did new
   client bundles appear" detection — the reload re-fetches the live boot manifest, which
   already carries any new package's client bundle, so a market hot-install lands every time).
+  Failure details surface the **whole cause chain** (incl. `AggregateError.errors`), so a
+  wrapped error like `failed to rollback loader entry ...: ` never hides the real reason.
 - **No process exit** — the host keeps running; sessions replay their history from the
   persisted log after the page reload (the web app's standard reload recovery).
 - **Hot package updates (0.2.0)** — every bundle is fingerprinted on disk (seeded at
   boot); when a mounted package's files change in place (market reinstall/update), the
   refresh re-points its loader rows at a cache-busted entry URL, so the loader re-imports
   and runs the NEW code — no restart, and no "tool already registered" collision (the
-  loader withdraws the old fiber's registrations before starting the new one).
+  loader withdraws the old fiber's registrations before starting the new one). The refresh
+  additionally **evicts the package's cached modules from the Node ESM loadCache** (entry
+  AND relative dependencies — a `?dshr=` on the entry alone cannot reach `./dep.js`), so
+  upgrades that changed non-entry files (e.g. a new export in `lib/*.js`) also load fresh.
 - **Collision self-heal (0.2.0)** — if a refresh still hits
   `tool "X" is already registered`, the plugin identifies the offending package,
   force-busts its module cache and retries once — the collision heals itself

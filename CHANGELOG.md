@@ -37,6 +37,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Module-cache eviction for upgraded packages**: the `?dshr=` bust previously
+  only re-keyed a row's ENTRY file — the entry's RELATIVE imports resolve
+  without the query, so an upgrade that changed non-entry files (e.g.
+  dshmarket's `lib/dsh-cli.js` gaining an export its new `index.js` imports)
+  kept serving the pre-update modules and failed with
+  `The requested module './dsh-cli.js' does not provide an export named ...`.
+  The refresh now evicts every busted package's modules from the Node internal
+  ESM `loadCache` (all file URLs under the package plus the busted entry URL)
+  before applying, so changed relative dependencies load fresh too. Falls back
+  to the entry-only bust when the Node internals are unavailable.
+- **Error chain surfaced on failure**: a wrapped failure like
+  `failed to rollback loader entry include (cordis:include): ` (the inner
+  `AggregateError` message is empty by default) previously hid the underlying
+  cause. The refresh response and the settings section now flatten the whole
+  cause chain (incl. `AggregateError.errors`), so the real reason (e.g.
+  `tool "X" is already registered` or `webserver: duplicate prefix route ...`)
+  is always visible.
 - **Direct refresh: success always reloads the page** — `一键刷新插件` no longer
   diffs for client-graph changes (`clientGraphChanged`) to decide whether a
   page reload is needed. A successful refresh now always reloads the page
